@@ -1,0 +1,1710 @@
+# agent-router-mcp — default catalog.
+# User overrides are merged on top of this file. Model cards are opinionated
+# routing hints, not benchmarks: re-check them when `checked_at` gets stale.
+#
+# Curation rules (2026-11-25):
+# - Prefer independent agentic/terminal runs (Vals / Snorkel Terminal-Bench, SWE-Atlas,
+#   FrontierSWE) over saturated vendor leaderboards; a model is ranked in the harness it runs in.
+# - No preset uses `max` effort: on the measured models `max` costs several times more
+#   tokens and is often no better than `high`/`xhigh`.
+# - Review and security roles go to a different vendor or lab than the author role.
+# - Every preset maps all 23 built-in roles; every preset role points to an enabled model.
+
+schema_version = 1
+
+[defaults]
+stale_after_days = 90
+max_concurrency = 8
+max_queue_size = 32
+default_timeout_sec = 900
+max_timeout_sec = 3600
+max_mcp_output_bytes = 24000
+max_log_bytes_per_job = 10485760
+orch_max_depth = 1
+inherit_mcp = false
+require_plan_id = false
+allow_unsandboxed_write = true
+
+[aliases]
+# Backwards-compatible and convenience aliases (alias -> canonical id in [models])
+"claude-opus" = "claude-opus-5-5"
+"claude-sonnet" = "claude-sonnet-5-5"
+"claude-fable" = "claude-fable-5-2"
+"claude-haiku" = "claude-haiku-5-5"
+"gpt-sol" = "gpt-6.2-sol"
+"gpt-astra" = "gpt-6.2-astra"
+"gpt-terra" = "gpt-6.1-terra"
+"gpt-luna" = "gpt-6-luna"
+"deepseek-r1" = "deepseek-v4-pro"
+"deepseek-v4.1-flash" = "deepseek-flash"
+"glm-5.3" = "pi-glm-5.3"
+"glm-5.3-flash" = "pi-glm-5.3-flash"
+"kimi-k3.1-pro" = "pi-kimi-k3.1-pro"
+"kimi-k2.7-code" = "pi-kimi-k2.7-code"
+"qwen4-max" = "pi-qwen4-max"
+"minimax-m3.1-flash" = "pi-minimax-m3.1-flash"
+"mimo-v2.6-pro" = "pi-mimo-v2.6-pro"
+"grok-4.7" = "pi-grok-4.7"
+"gemini-4-argon" = "pi-gemini-4-argon"
+"agy-neon" = "agy-gemini-4-neon"
+"agy-argon" = "agy-gemini-4-argon"
+"agy-flash" = "agy-gemini-3.8-flash"
+"grok-build" = "grok-build-4.7"
+"muse-spark" = "muse-spark-1.3"
+
+# ---------------------------------------------------------------------------
+# Harnesses
+# ---------------------------------------------------------------------------
+
+[harnesses.claude]
+driver = "claude"
+display_name = "Claude Code"
+binary = "claude"
+enabled = true
+write_permission_mode = "acceptEdits"
+extra_args = []
+
+[harnesses.codex]
+driver = "codex"
+display_name = "Codex CLI"
+binary = "codex"
+enabled = true
+extra_args = []
+
+[harnesses.dsh]
+driver = "dsh"
+display_name = "DeepSeek Harness"
+binary = "dsh"
+enabled = true
+profile = "headless"
+default_upstream_provider = "deepseek-official"
+extra_args = []
+
+[harnesses.pi]
+driver = "pi"
+display_name = "Pi"
+binary = "pi"
+enabled = true
+extra_args = []
+
+# Live-verified drivers beyond the core four.
+
+[harnesses.antigravity]
+driver = "antigravity"
+display_name = "Antigravity CLI"
+binary = "agy"
+enabled = true
+write_permission_mode = "accept-edits"
+extra_args = []
+
+[harnesses.opencode]
+driver = "opencode"
+display_name = "OpenCode"
+binary = "opencode"
+enabled = true
+extra_args = []
+
+[harnesses.gemini]
+driver = "gemini"
+display_name = "Gemini CLI"
+binary = "gemini"
+enabled = true
+write_permission_mode = "auto_edit"
+extra_args = []
+
+# Experimental built-in drivers: verify flags against the local CLI version.
+
+[harnesses.cursor]
+driver = "cursor"
+display_name = "Cursor CLI"
+binary = "cursor-agent"
+enabled = true
+extra_args = []
+
+[harnesses.grok]
+driver = "grok"
+display_name = "Grok Build"
+binary = "grok"
+enabled = true
+extra_args = []
+
+[harnesses.kiro]
+driver = "kiro"
+display_name = "Kiro CLI"
+binary = "kiro-cli"
+enabled = true
+extra_args = []
+
+[harnesses.fx]
+driver = "fx"
+display_name = "Vercel fx"
+binary = "fx"
+enabled = true
+extra_args = []
+
+[harnesses.muse]
+driver = "muse"
+display_name = "Muse Code"
+binary = "muse"
+enabled = true
+extra_args = []
+
+# Experimental ecosystem drivers.
+
+[harnesses.copilot]
+driver = "copilot"
+display_name = "GitHub Copilot CLI"
+binary = "copilot"
+enabled = true
+extra_args = []
+
+[harnesses.droid]
+driver = "droid"
+display_name = "Factory Droid"
+binary = "droid"
+enabled = true
+write_permission_mode = "medium"
+extra_args = []
+
+[harnesses.qwen]
+driver = "qwen"
+display_name = "Qwen Code"
+binary = "qwen"
+enabled = true
+write_permission_mode = "auto-edit"
+extra_args = []
+
+[harnesses.kimi]
+driver = "kimi"
+display_name = "Kimi CLI"
+binary = "kimi"
+enabled = true
+extra_args = []
+
+[harnesses.vibe]
+driver = "vibe"
+display_name = "Mistral Vibe"
+binary = "vibe"
+enabled = true
+extra_args = []
+
+# ---------------------------------------------------------------------------
+# Models — Anthropic (Claude Code)
+# ---------------------------------------------------------------------------
+
+[models."claude-opus-5-5"]
+harness = "claude"
+cli_model = "claude-opus-5-5"
+display_name = "Claude Opus 5.5"
+tier = "deep"
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "high"
+cost_tier = "high"
+cost_note = "~$4 / $20 per 1M tokens (input / output). Pays off on architecture, review, and root-cause work. At max it burns ~173K output tokens per task — never use max."
+speed_note = "Medium on medium/high, slow on xhigh/max: thinks for a long time before its first action."
+context_window = 200000
+strengths = [
+  "#1 on Senior SWE-bench for solution neatness: minimal, readable, in the project's style",
+  "Best reviewer in the catalog: finds non-obvious consumers of a change and edge cases",
+  "#2 DesignArena HII; Terminal-Bench 4 — 64.8% (Snorkel)",
+]
+weaknesses = [
+  "Can inflate task scope without clear boundaries",
+  "max effort is a trap: several times the cost of high with no noticeable gain",
+  "200K context — smaller than the 1M-context models",
+]
+best_for = [
+  "Architecture and change plans with strict invariants and contracts",
+  "Independent code review and final check of a risky change",
+  "Root cause debugging of tangled bugs, security audit",
+]
+avoid_for = [
+  "Boilerplate and mass mechanical edits",
+  "Scanning huge volumes of text — cheaper 1M-context models exist",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."claude-sonnet-5-5"]
+harness = "claude"
+cli_model = "claude-sonnet-5-5"
+display_name = "Claude Sonnet 5.5"
+tier = "standard"
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "high"
+cost_tier = "medium"
+cost_note = "~$2 / $10 per 1M tokens. Best ROI for implementation against a clear spec: ~$0.11 per task on high. At max — ~$10 per task, flatly unprofitable."
+speed_note = "Fast on low/medium; high is a sensible balance of depth and time."
+context_window = 200000
+strengths = [
+  "Reliable feature implementation from a ready plan, in the project's style",
+  "Writes and runs tests on its own until they pass",
+  "#4 for UI components on DesignArena",
+]
+weaknesses = [
+  "Burns tokens almost like Opus when the spec is vague",
+  "Trails Opus on tasks with many hidden interdependencies",
+]
+best_for = [
+  "Implementation of medium-sized features and refactors from a plan",
+  "Creating and fixing tests",
+  "Fast sprint implementation and small edits on medium",
+]
+avoid_for = [
+  "High-stakes architecture decisions",
+  "Trivial edits where Haiku or Luna is enough",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."claude-fable-5-2"]
+harness = "claude"
+cli_model = "claude-fable-5-2"
+display_name = "Claude Fable 5.2"
+tier = "deep"
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "high"
+cost_tier = "premium"
+cost_note = "~$8 / $40 per 1M tokens — the most token-hungry model in the catalog: reads whole files instead of searching. Use it where autonomy and taste matter."
+speed_note = "Slow; max is often worse than high/xhigh — do not go above high/xhigh."
+context_window = 200000
+strengths = [
+  "#1 AA Intelligence (65); FrontierSWE v2 — 69.9%",
+  "#1 DesignArena HII and UI components (1391): the best interface taste",
+  "S-Tier for autonomous end-to-end delivery of complex features",
+]
+weaknesses = [
+  "Misses small details in code review",
+  "Highest cost: reads whole files instead of grepping",
+  "max effort often gives worse results than high/xhigh",
+]
+best_for = [
+  "UI/UX: frontend layout, design systems, the interface and its states",
+  "Autonomous implementation of complex features and large-scale refactoring",
+  "UX copywriting, documentation, and product specs",
+]
+avoid_for = [
+  "Code review and final approval of changes",
+  "Boilerplate and small edits — overpaying several times over",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."claude-haiku-5-5"]
+harness = "claude"
+cli_model = "claude-haiku-5-5"
+display_name = "Claude Haiku 5.5"
+tier = "light"
+efforts = ["low", "medium", "high"]
+default_effort = "medium"
+cost_tier = "low"
+cost_note = "Ultra-cheap Claude model: run many small subtasks in parallel."
+speed_note = "Very fast, near-instant response on low."
+context_window = 200000
+strengths = [
+  "Fast triage, classification, and short summaries",
+  "Code search and targeted answers",
+  "Short edits in 1–2 files",
+]
+weaknesses = [
+  "Weak at multi-step terminal work (Terminal-Bench 4 — 39.2%)",
+  "Fixes the symptom, not the cause",
+]
+best_for = [
+  "Fast triage, codebase search, short answers",
+  "Small edits in 1–2 files",
+]
+avoid_for = [
+  "Architecture, review, security",
+  "Long multi-step terminal sessions",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Models — OpenAI (Codex CLI)
+# ---------------------------------------------------------------------------
+
+[models."gpt-6.2-astra"]
+harness = "codex"
+cli_model = "gpt-6.2-astra"
+display_name = "GPT-6.2 Astra"
+tier = "deep"
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "xhigh"
+cost_tier = "premium"
+cost_note = "~$8 / $40 per 1M tokens. Terminal-Bench 4: $4.69 per test vs $1.13 for Sol — use it where maximum depth is needed."
+speed_note = "Slow on xhigh; unsupervised, it can get stuck in long autonomous loops."
+context_window = 400000
+strengths = [
+  "#2 AA Intelligence (62), #1 Terminal-Bench-Science",
+  "Mercor OpenWorldEngineer — 67.2%; #2 DesignArena Frontend Web App",
+  "Powerful independent review and computer use",
+]
+weaknesses = [
+  "Expensive: ~4x the cost of Sol per terminal test",
+  "Dry, hard-to-read reports",
+  "Prone to getting stuck in long autonomous loops without supervision",
+]
+best_for = [
+  "Independent review and security audit (a different vendor from the author)",
+  "Root cause of complex bugs, debugging on xhigh",
+  "Deep performance analysis",
+]
+avoid_for = [
+  "Routine implementation — Sol delivers the same result ~4x cheaper",
+  "User-facing copy and documentation",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."gpt-6.2-sol"]
+harness = "codex"
+cli_model = "gpt-6.2-sol"
+display_name = "GPT-6.2 Sol"
+tier = "deep"
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
+cost_tier = "medium"
+cost_note = "~$2 / $10 per 1M tokens. ROI king in the terminal: Vals Terminal-Bench 4 — 60.6% at $1.13 per test."
+speed_note = "Fast on medium, reasonable on high/xhigh."
+context_window = 400000
+strengths = [
+  "Vals Terminal-Bench 4 — 60.6%, Snorkel TB4.1 — 61.5% at a quarter of Astra's price",
+  "#1 DesignArena Code (1466) and #3 Websites (1406)",
+  "Confident debugging, DevOps, and test work in the terminal",
+]
+weaknesses = [
+  "Drops 14 pts on SWE-Atlas-QnA: misses facts in codebase answers and research",
+  "Dry reporting style",
+]
+best_for = [
+  "Debugging and reproducing bugs in the terminal",
+  "Strict independent review (a different vendor from the code author)",
+  "DevOps, tests, frontend code, and performance",
+]
+avoid_for = [
+  "Codebase questions and research: misses facts",
+  "User-facing copy and copywriting",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."gpt-6.1-terra"]
+harness = "codex"
+cli_model = "gpt-6.1-terra"
+display_name = "GPT-6.1 Terra"
+tier = "standard"
+efforts = ["low", "medium", "high", "xhigh"]
+default_effort = "medium"
+cost_tier = "low"
+cost_note = "~$1 / $5 per 1M tokens — half the price of Sol."
+speed_note = "Fast; good for fast subagents."
+context_window = 400000
+strengths = [
+  "Vision: understands screenshots and mockups",
+  "Clear, readable reports",
+  "Narrow, verifiable edits and tests that follow a pattern",
+]
+weaknesses = [
+  "Trails Sol and Astra on deep system logic and architecture",
+]
+best_for = [
+  "Narrow, verifiable edits and tests",
+  "Fast visual QA triage of the UI from a screenshot",
+  "Fast subagents for triage: repo recon, research summaries",
+]
+avoid_for = [
+  "Architecture and complex system logic",
+  "Final security audit",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."gpt-6-luna"]
+harness = "codex"
+cli_model = "gpt-6-luna"
+display_name = "GPT-6 Luna"
+tier = "light"
+efforts = ["low", "medium", "high", "xhigh"]
+default_effort = "low"
+cost_tier = "low"
+cost_note = "~20x cheaper than Sol."
+speed_note = "Very fast; fits short edit → check loops."
+context_window = 400000
+strengths = [
+  "Data extraction and fast triage",
+  "Small deterministic edits and boilerplate",
+  "Large context for a light model — 400K",
+]
+weaknesses = [
+  "Struggles with ambiguous engineering tasks",
+]
+best_for = [
+  "Boilerplate, configs, mechanical edits",
+  "Fast triage and data extraction",
+]
+avoid_for = [
+  "Review, security, architecture",
+  "Ambiguous specs and contract changes",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Models — DeepSeek (dsh and Pi)
+# ---------------------------------------------------------------------------
+
+[models."deepseek-flash"]
+harness = "dsh"
+cli_model = "deepseek-flash"
+cli_provider = "deepseek-official"
+display_name = "DeepSeek V4.1 Flash (1017)"
+tier = "standard"
+efforts = ["off", "low", "high", "max"]
+default_effort = "low"
+cost_tier = "low"
+cost_note = "A-Tier on price / performance; one of the most-used models in Pi on OpenRouter."
+speed_note = "Very fast: 552B MoE with 4x KV-cache compression."
+context_window = 1000000
+strengths = [
+  "Vals Terminal-Bench 4 — 31.8% vs 14.1% for the older V4 Pro (Mini-SWE-agent)",
+  "Native vision and 1M context at a light-model price",
+  "In dsh it runs in an OS sandbox in both readonly and write mode",
+]
+weaknesses = [
+  "Can lose the thread on the hardest multi-file refactors",
+  "The official DSH provider has no medium effort level: only off / low / high / max",
+]
+best_for = [
+  "First-pass repo recon and research summaries of large documents",
+  "Budget implementation, debugging, and tests in a sandbox",
+  "Fast iterations and boilerplate",
+]
+avoid_for = [
+  "Large multi-file refactors without supervision",
+  "Final review and security audit",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."deepseek-v4-pro"]
+harness = "dsh"
+cli_model = "deepseek-v4-pro"
+cli_provider = "deepseek-official"
+display_name = "DeepSeek V4 Pro"
+tier = "deep"
+efforts = ["off", "low", "high", "max"]
+default_effort = "high"
+cost_tier = "low"
+cost_note = "Inexpensive deep analysis with 1M context."
+speed_note = "Medium on high; noticeably slower and costlier on max."
+context_window = 1000000
+strengths = [
+  "Text analyst with 1M context: whole specifications and large chunks of code",
+  "Inexpensive second opinion and contradiction finding",
+  "Parsing text specifications and comparing options",
+]
+weaknesses = [
+  "No vision: cannot read screenshots or mockups",
+  "In Vals agentic terminal runs it lost to the newer Flash 1017 — do not rank it above Flash by name",
+]
+best_for = [
+  "Inexpensive analysis, research, and second opinions",
+  "Budget review and test strategy",
+  "Long context research over text specifications",
+]
+avoid_for = [
+  "UI/UX and anything that needs vision",
+  "Long autonomous write sessions in the terminal",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."pi-deepseek-v4.1-flash"]
+harness = "pi"
+cli_model = "deepseek-v4.1-flash"
+cli_provider = "opencode-go"
+display_name = "DeepSeek V4.1 Flash (Pi)"
+tier = "standard"
+efforts = ["off", "low", "high", "max"]
+default_effort = "low"
+cost_tier = "low"
+cost_note = "The same cheap DeepSeek V4.1 Flash, but through Pi (opencode-go provider)."
+speed_note = "Very fast."
+context_window = 1000000
+strengths = [
+  "Same strengths as DeepSeek V4.1 Flash: speed, price, vision, 1M",
+  "Fallback route to Flash when dsh is unavailable",
+]
+weaknesses = [
+  "In write mode Pi runs without an OS sandbox",
+  "Can lose the thread on complex multi-file refactors",
+]
+best_for = [
+  "Fast repo recon, triage, and research summaries through Pi",
+  "Budget implementation when dsh is unavailable",
+]
+avoid_for = [
+  "Final review and security audit",
+  "Writes to critical code without a sandbox",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."pi-deepseek-v4-pro"]
+harness = "pi"
+cli_model = "deepseek-v4-pro"
+cli_provider = "deepseek"
+display_name = "DeepSeek V4 Pro (Pi)"
+tier = "deep"
+efforts = ["off", "high", "max"]
+default_effort = "high"
+cost_tier = "low"
+cost_note = "The same inexpensive V4 Pro as in dsh, but through Pi; token usage spikes on max."
+speed_note = "Medium on high, slow on max."
+context_window = 1000000
+strengths = [
+  "Fallback route to DeepSeek V4 Pro when dsh is unavailable",
+  "1M context for text analysis",
+]
+weaknesses = [
+  "Text only, no vision",
+  "Coarse effort scale: only off / high / max",
+]
+best_for = [
+  "Deep text research and second opinions through Pi",
+]
+avoid_for = [
+  "UI/UX and screenshots",
+  "Fast small edits",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Models — Zhipu GLM (Pi)
+# ---------------------------------------------------------------------------
+
+[models."pi-glm-5.3"]
+harness = "pi"
+cli_model = "glm-5.3"
+cli_provider = "zai"
+display_name = "GLM-5.3 (Pi)"
+tier = "deep"
+efforts = ["off", "low", "high", "max"]
+default_effort = "high"
+cost_tier = "low"
+cost_note = "Cheap, strong open model."
+speed_note = "Medium on high; very slow on max and takes many steps."
+context_window = 1000000
+strengths = [
+  "Long backend logic and code tracing across many modules",
+  "Security-minded: a good inexpensive second opinion",
+  "1M context",
+]
+weaknesses = [
+  "Text only, no vision",
+  "Very slow on max and takes many steps",
+]
+best_for = [
+  "Code tracing, codebase questions, root cause debugging",
+  "Budget security audit and review",
+  "Second opinion on backend logic",
+]
+avoid_for = [
+  "UI/UX and anything that needs vision",
+  "Fast small edits — faster options exist",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."pi-glm-5.3-flash"]
+harness = "pi"
+cli_model = "glm-5.3-flash"
+cli_provider = "zai"
+display_name = "GLM-5.3 Flash (Pi)"
+tier = "light"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "medium"
+cost_tier = "low"
+cost_note = "Very cheap; one of the most popular models in Pi on OpenRouter."
+speed_note = "Fast."
+context_window = 1000000
+strengths = [
+  "Native vision: fast visual check from a screenshot",
+  "Fast recon and scoped edits",
+]
+weaknesses = [
+  "Not for complex architecture or deep logic",
+]
+best_for = [
+  "Fast visual QA triage of the UI",
+  "Repo recon and small edits",
+]
+avoid_for = [
+  "Architecture, security audit, final review",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."pi-glm-5.3-highspeed"]
+harness = "pi"
+cli_model = "glm-5.3-highspeed"
+cli_provider = "zai"
+display_name = "GLM-5.3 Highspeed (Pi)"
+tier = "standard"
+efforts = ["off", "low", "high", "max"]
+default_effort = "low"
+cost_tier = "low"
+cost_note = "Cheap accelerated version of GLM-5.3."
+speed_note = "Fast on off/low — for short iterations."
+context_window = 1000000
+strengths = [
+  "Fast iterations on GLM-5.3 logic",
+  "Cheap, fast second opinion",
+]
+weaknesses = [
+  "No vision",
+  "Less depth than regular GLM-5.3 on high",
+]
+best_for = [
+  "Fast second opinion, triage, and short iterations",
+]
+avoid_for = [
+  "UI/UX and screenshots",
+  "Final security audit",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Models — Moonshot Kimi (Pi)
+# ---------------------------------------------------------------------------
+
+[models."pi-kimi-k3.1-pro"]
+harness = "pi"
+cli_model = "kimi-k3.1-pro"
+cli_provider = "opencode-go"
+display_name = "Kimi K3.1 Pro (Pi)"
+tier = "deep"
+efforts = ["off", "low", "medium", "high", "max"]
+default_effort = "high"
+cost_tier = "medium"
+cost_note = "Medium price; noticeably higher quota usage than Flash models."
+speed_note = "Heavier and slower than Flash models."
+context_window = 1000000
+strengths = [
+  "Strongest independent terminal result among non-Western models: Snorkel TB4.1 — 59.7% ±4.2",
+  "1M context and vision; tops the Frontend Arenas",
+  "Several times stronger than the base K3 (23% on TB4.1)",
+]
+weaknesses = [
+  "Heavier and slower than Flash models",
+  "Higher quota usage",
+]
+best_for = [
+  "Long context analysis of very large inputs and a repository map",
+  "Second opinion from a different lab on a hard decision",
+  "Implementation and frontend without Western models",
+]
+avoid_for = [
+  "Fast small edits — overpaying in time",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."pi-kimi-k2.7-code"]
+harness = "pi"
+cli_model = "kimi-k2.7-code"
+cli_provider = "opencode-go"
+display_name = "Kimi K2.7 Code (Pi)"
+tier = "standard"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "medium"
+cost_tier = "low"
+cost_note = "Cheap coding model."
+speed_note = "Fast."
+context_window = 262144
+strengths = [
+  "Fast coding workhorse for everyday edits and debugging",
+  "Has vision",
+]
+weaknesses = [
+  "262K context vs 1M for K3.1 Pro",
+  "Few independent runs in headless Pi",
+]
+best_for = [
+  "Budget feature implementation from a plan",
+  "Everyday edits, debugging, and SQL",
+]
+avoid_for = [
+  "Architecture and final review",
+  "Long context analysis of very large inputs",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."pi-kimi-k3"]
+harness = "pi"
+cli_model = "kimi-k3"
+cli_provider = "opencode-go"
+display_name = "Kimi K3 (Pi)"
+tier = "standard"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "high"
+cost_tier = "medium"
+cost_note = "Medium price; no benefit while K3.1 Pro is available."
+speed_note = "Medium."
+context_window = 1000000
+strengths = [
+  "Fallback in case K3.1 Pro is unavailable: same 1M context and vision",
+]
+weaknesses = [
+  "Noticeably weaker than K3.1 Pro on TB4.1 (23% vs 59.7%)",
+]
+best_for = [
+  "Fallback route when K3.1 Pro is unavailable",
+]
+avoid_for = [
+  "Default choice while K3.1 Pro is available",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Models — Alibaba Qwen (Pi)
+# ---------------------------------------------------------------------------
+
+[models."pi-qwen4-max"]
+harness = "pi"
+cli_model = "qwen4-max"
+cli_provider = "opencode-go"
+display_name = "Qwen4 Max (Pi)"
+tier = "deep"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "high"
+cost_tier = "medium"
+cost_note = "~$1.50 / $4.50 per 1M tokens."
+speed_note = "Medium."
+context_window = 1000000
+strengths = [
+  "2.4T MoE (71B active), vision, and 1M context",
+  "Vals Terminal-Bench 4 — 48.5%: a big jump over Qwen 3.8 Max",
+  "~1750 Elo on WebDev Arena: strong at UI and multilingual code",
+]
+weaknesses = [
+  "Closed weights",
+  "Trails Opus 5.5 and Kimi K3.1 Pro in pure CLI engineering",
+]
+best_for = [
+  "Frontend and UI, multilingual code",
+  "Second opinion on interface and web code",
+]
+avoid_for = [
+  "Complex terminal work, where Opus and K3.1 Pro are stronger",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."pi-qwen3.8-max"]
+harness = "pi"
+cli_model = "qwen3.8-max"
+cli_provider = "opencode-go"
+display_name = "Qwen 3.8 Max (Pi)"
+tier = "standard"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "medium"
+cost_tier = "medium"
+cost_note = "Medium price; Qwen4 Max is stronger for similar money."
+speed_note = "Fast on medium."
+context_window = 1000000
+strengths = [
+  "Stable previous-generation model: Vals Terminal-Bench 4 — 34.3%",
+  "1M context and vision",
+  "Implementation and refactoring from a clear plan",
+]
+weaknesses = [
+  "Trails Qwen4 Max in quality",
+  "Results must be verified with tests and review",
+]
+best_for = [
+  "Implementation and refactoring from a clear plan",
+  "SQL and visual QA of the UI",
+]
+avoid_for = [
+  "Architecture and final review",
+  "Security and handling secrets",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."pi-qwen3.8-flash"]
+harness = "pi"
+cli_model = "qwen3.8-flash"
+cli_provider = "opencode-go"
+display_name = "Qwen 3.8 Flash (Pi)"
+tier = "light"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "medium"
+cost_tier = "low"
+cost_note = "Cheap."
+speed_note = "Fast."
+context_window = 1000000
+strengths = [
+  "Fast, cheap visual triage",
+  "Draft UI prototypes and boilerplate",
+]
+weaknesses = [
+  "Shallow on complex logic and security",
+]
+best_for = [
+  "Draft frontend layouts and UI prototypes",
+  "Boilerplate and fast visual QA triage",
+]
+avoid_for = [
+  "Complex logic, security audit, review",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Models — Google Gemini (Pi)
+# ---------------------------------------------------------------------------
+
+[models."pi-gemini-4-argon"]
+harness = "pi"
+cli_model = "gemini-4-argon"
+cli_provider = "opencode-go"
+display_name = "Gemini 4 Argon (Pi)"
+tier = "specialist"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "high"
+cost_tier = "medium"
+cost_note = "Medium price."
+speed_note = "Slow start (~15 s to first token) and modest generation speed; Google/Antigravity offers the faster Gemini 4 Neon."
+context_window = 1000000
+strengths = [
+  "Lowest hallucination rate: 4.3% on AA-Omniscience",
+  "#1 DesignArena Image-to-Frontend (1294): layouts from a screenshot or mockup",
+  "Terminal-Bench 4.0 — 57.6%; vision and 1M context",
+]
+weaknesses = [
+  "Slow start (~15 s) and modest generation speed",
+]
+best_for = [
+  "Research and fact analysis with minimal hallucinations",
+  "Frontend layout and visual review from a screenshot or mockup",
+  "Long context analysis",
+]
+avoid_for = [
+  "Short rapid iterations and triage — the slow start gets in the way",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Models — MiniMax (Pi)
+# ---------------------------------------------------------------------------
+
+[models."pi-minimax-m3.1-flash"]
+harness = "pi"
+cli_model = "minimax-m3.1-flash"
+cli_provider = "opencode-go"
+display_name = "MiniMax M3.1 Flash (Pi)"
+tier = "light"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "medium"
+cost_tier = "low"
+cost_note = "Ultra-cheap: ~$0.15 / $0.60 per 1M tokens."
+speed_note = "Ultra-fast: ~219 tok/s on OpenRouter."
+context_window = 1000000
+strengths = [
+  "Vals Terminal-Bench 4 — 25.25% vs 1.01% for the base M3",
+  "Vision and 1M context at a minimal price",
+  "Documentation, summaries, and fast scoped edits",
+]
+weaknesses = [
+  "Not for complex autonomous debugging",
+]
+best_for = [
+  "Documentation, README, and research summaries",
+  "Fast, scoped small edits",
+]
+avoid_for = [
+  "Complex autonomous debugging",
+  "Review and security audit",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."pi-minimax-m3"]
+harness = "pi"
+cli_model = "minimax-m3"
+cli_provider = "opencode-go"
+display_name = "MiniMax M3 (Pi)"
+tier = "specialist"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "medium"
+cost_tier = "low"
+cost_note = "Cheap."
+speed_note = "Slow, deep thinking."
+context_window = 1000000
+strengths = [
+  "Fallback multimodal model for draft mockups and comparisons",
+]
+weaknesses = [
+  "Fails Vals Terminal-Bench 4 (1.01%)",
+  "Slow, deep thinking",
+]
+best_for = [
+  "Draft UI mockups and visual QA comparisons",
+]
+avoid_for = [
+  "Terminal CLI tasks — MiniMax M3.1 Flash is better",
+  "Implementation and debugging",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Models — Xiaomi MiMo (Pi)
+# ---------------------------------------------------------------------------
+
+[models."pi-mimo-v2.6-pro"]
+harness = "pi"
+cli_model = "mimo-v2.6-pro"
+cli_provider = "opencode-go"
+display_name = "MiMo v2.6 Pro (Pi)"
+tier = "standard"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "high"
+cost_tier = "low"
+cost_note = "Cheap."
+speed_note = "Medium."
+context_window = 1000000
+strengths = [
+  "Omnimodal model with 1M context (Snorkel TB4.1 — 27.0% ±3.6)",
+  "Inexpensive second opinion on code, logs, and screenshots",
+  "Web scaffolding",
+]
+weaknesses = [
+  "Independent audits note missed subtle logic and security bugs",
+]
+best_for = [
+  "Cheap second opinion on code, logs, and screenshots",
+  "Web scaffolding and draft UI mockups",
+]
+avoid_for = [
+  "Final approval: review and security audit",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."pi-mimo-v2.6-flash"]
+harness = "pi"
+cli_model = "mimo-v2.6-flash"
+cli_provider = "opencode-go"
+display_name = "MiMo v2.6 Flash (Pi)"
+tier = "light"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "low"
+cost_tier = "low"
+cost_note = "Very cheap."
+speed_note = "Fast."
+context_window = 1000000
+strengths = [
+  "Fast fact extraction, log parsing, and recon (TB4.1 — 16.1%)",
+]
+weaknesses = [
+  "Not for edits to critical code",
+]
+best_for = [
+  "Fact extraction, research summaries of logs, fast repo recon and triage",
+]
+avoid_for = [
+  "Edits to critical code, review, security",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Models — xAI Grok (Pi)
+# ---------------------------------------------------------------------------
+
+[models."pi-grok-4.7"]
+harness = "pi"
+cli_model = "grok-4.7"
+cli_provider = "opencode-go"
+display_name = "Grok 4.7 (Pi)"
+tier = "specialist"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "low"
+cost_tier = "medium"
+cost_note = "~$2 / $6 per 1M tokens."
+speed_note = "Fastest reaction: ~0.96 s to first token, ~145 tok/s."
+context_window = 500000
+strengths = [
+  "Fastest response in the catalog; 500K context and vision",
+  "AA Cyber Index — 56.4 with 0% refusals: fast cyber recon",
+]
+weaknesses = [
+  "Drops sharply outside its own Grok Build harness: 24–29% on TB4 in neutral harnesses vs 37.6% in the vendor's own",
+  "~29% hallucinations",
+]
+best_for = [
+  "Fast triage and repo recon on low",
+  "Cyber repo recon without refusals (readonly only)",
+]
+avoid_for = [
+  "Autonomous implementation in Pi",
+  "Fact research and final review: high hallucination rate",
+]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Models — Google (Antigravity CLI, Gemini CLI)
+# ---------------------------------------------------------------------------
+
+[models."agy-gemini-4-neon"]
+harness = "antigravity"
+cli_model = "gemini-4-neon"
+vendor_family = "google"
+display_name = "Gemini 4 Neon (Antigravity)"
+tier = "deep"
+efforts = ["low", "medium", "high", "xhigh"]
+default_effort = "high"
+cost_tier = "high"
+cost_note = "Expensive Google quota; use xhigh only for complex tasks."
+speed_note = "Starts faster than Gemini 4 Argon."
+context_window = 1000000
+strengths = [
+  "Google's flagship in its native Antigravity harness",
+  "1M context and vision: large repos and mockups",
+]
+weaknesses = [
+  "MCP is not isolated: the harness sees its own MCP servers",
+  "Prompt goes through argv — ~100 KB limit",
+]
+best_for = ["Architecture and complex implementation across a large context"]
+avoid_for = ["Small mechanical edits"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."agy-gemini-4-argon"]
+harness = "antigravity"
+cli_model = "gemini-4-argon"
+vendor_family = "google"
+display_name = "Gemini 4 Argon (Antigravity)"
+tier = "standard"
+efforts = ["low", "medium", "high"]
+default_effort = "high"
+cost_tier = "medium"
+cost_note = "Medium price."
+speed_note = "Slow start (~15 s to first token)."
+context_window = 1000000
+strengths = [
+  "Low hallucination rate: facts and research",
+  "Layouts from a screenshot or mockup",
+]
+weaknesses = [
+  "Slow start hampers short iterations",
+  "Prompt goes through argv — ~100 KB limit",
+]
+best_for = ["Fact research and visual review"]
+avoid_for = ["Fast triage"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."agy-gemini-3.8-flash"]
+harness = "antigravity"
+cli_model = "gemini-3.8-flash"
+vendor_family = "google"
+display_name = "Gemini 3.8 Flash (Antigravity)"
+tier = "light"
+efforts = ["low", "medium", "high"]
+default_effort = "medium"
+cost_tier = "low"
+cost_note = "Cheap quota."
+speed_note = "Fast."
+context_window = 1000000
+strengths = [
+  "Cheap repository recon with 1M context",
+  "Fast response on medium",
+]
+weaknesses = [
+  "Weaker at multi-step implementation",
+  "Prompt goes through argv — ~100 KB limit",
+]
+best_for = ["Repo recon and fast triage"]
+avoid_for = ["Final review and security audit"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."gemini-cli-4-argon"]
+harness = "gemini"
+cli_model = "gemini-4-argon"
+vendor_family = "google"
+display_name = "Gemini 4 Argon (Gemini CLI)"
+tier = "standard"
+efforts = ["default"]
+default_effort = "default"
+cost_tier = "medium"
+cost_note = "Medium price; effort is not configurable in Gemini CLI."
+speed_note = "Slow start (~15 s to first token)."
+context_window = 1000000
+strengths = [
+  "Low hallucination rate: facts and research",
+  "Prompt via stdin and MCP isolation via a flag",
+]
+weaknesses = [
+  "No effort selection",
+  "Slow start hampers short iterations",
+]
+best_for = ["Fact research and long context analysis"]
+avoid_for = ["Fast triage"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."gemini-cli-3.8-flash"]
+harness = "gemini"
+cli_model = "gemini-3.8-flash"
+vendor_family = "google"
+display_name = "Gemini 3.8 Flash (Gemini CLI)"
+tier = "light"
+efforts = ["default"]
+default_effort = "default"
+cost_tier = "low"
+cost_note = "Cheap quota."
+speed_note = "Fast."
+context_window = 1000000
+strengths = [
+  "Cheap recon with 1M context",
+  "Prompt via stdin, no argv limit",
+]
+weaknesses = [
+  "No effort selection",
+  "Weaker at multi-step implementation",
+]
+best_for = ["Repo recon and fast triage"]
+avoid_for = ["Final review and security audit"]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Models — OpenCode, Cursor, Kiro, Vercel fx, Copilot, Factory Droid
+# ---------------------------------------------------------------------------
+
+[models."opencode-default"]
+harness = "opencode"
+cli_model = "anthropic/claude-sonnet-5-5"
+vendor_family = "anthropic"
+display_name = "OpenCode (Claude Sonnet 5.5)"
+tier = "standard"
+efforts = ["default", "low", "medium", "high"]
+default_effort = "default"
+cost_tier = "medium"
+cost_note = "The model provider's price. Clone the card and set cli_model to any provider/model from your OpenCode settings."
+speed_note = "Depends on the selected model."
+context_window = 200000
+strengths = [
+  "Any provider via provider/model",
+  "Effort via model variants",
+]
+weaknesses = [
+  "When you change cli_model, update vendor_family too",
+  "Quality depends on the selected model",
+]
+best_for = ["Implementation against a clear spec on your own provider"]
+avoid_for = ["Tasks that need the vendor's native harness"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."cursor-auto"]
+harness = "cursor"
+cli_model = "auto"
+vendor_family = "unknown"
+display_name = "Cursor Auto"
+tier = "standard"
+efforts = ["default"]
+default_effort = "default"
+cost_tier = "medium"
+cost_note = "Included in the Cursor subscription; Cursor picks the model."
+speed_note = "Depends on the model Cursor picks."
+context_window = 200000
+strengths = [
+  "Cursor chooses the model for each task",
+  "MCP isolation via a flag",
+]
+weaknesses = [
+  "Experimental adapter; the model's vendor is not known in advance",
+  "Prompt goes through argv — ~100 KB limit",
+]
+best_for = ["Implementation and edits against a clear spec"]
+avoid_for = ["Independent review: the model's vendor is unpredictable"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."kiro-default"]
+harness = "kiro"
+cli_model = "default"
+display_name = "Kiro (default model)"
+tier = "standard"
+efforts = ["default"]
+default_effort = "default"
+cost_tier = "medium"
+cost_note = "Included in the Kiro subscription."
+speed_note = "Depends on the Kiro model."
+context_window = 200000
+strengths = [
+  "Spec-driven work, Kiro style",
+  "The model is set in Kiro itself",
+]
+weaknesses = [
+  "Experimental adapter",
+  "MCP is not isolated; prompt via argv",
+]
+best_for = ["Implementation from a ready spec"]
+avoid_for = ["Security audit"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."fx-default"]
+harness = "fx"
+cli_model = "default"
+display_name = "Vercel fx (default model)"
+tier = "standard"
+efforts = ["low", "medium", "high", "xhigh"]
+default_effort = "medium"
+cost_tier = "medium"
+cost_note = "Per Vercel pricing."
+speed_note = "Depends on the fx model."
+context_window = 200000
+strengths = [
+  "Native effort up to xhigh",
+  "Handy for frontend work in the Vercel ecosystem",
+]
+weaknesses = [
+  "Write only: the readonly profile is unverified, so readonly tasks on fx are forbidden",
+  "No sandbox; MCP is not isolated",
+]
+best_for = ["Frontend and implementation in Vercel projects"]
+avoid_for = ["Readonly review and audit"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."copilot-default"]
+harness = "copilot"
+cli_model = "default"
+vendor_family = "unknown"
+display_name = "GitHub Copilot (default model)"
+tier = "standard"
+efforts = ["default"]
+default_effort = "default"
+cost_tier = "medium"
+cost_note = "Included in the Copilot subscription."
+speed_note = "Depends on the Copilot model."
+context_window = 200000
+strengths = [
+  "Runs on a GitHub Copilot subscription",
+  "MCP isolation via a flag",
+]
+weaknesses = [
+  "Experimental adapter",
+  "Prompt via argv — ~100 KB limit",
+]
+best_for = ["Implementation and small edits"]
+avoid_for = ["Independent review: the model's vendor is unpredictable"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."droid-default"]
+harness = "droid"
+cli_model = "default"
+display_name = "Factory Droid (default model)"
+tier = "standard"
+efforts = ["off", "low", "medium", "high"]
+default_effort = "medium"
+cost_tier = "medium"
+cost_note = "Per Factory pricing."
+speed_note = "Depends on the Droid model."
+context_window = 200000
+strengths = [
+  "Native reasoning effort",
+  "Write autonomy is set by the low/medium/high level",
+]
+weaknesses = [
+  "Experimental adapter",
+  "MCP is not isolated",
+]
+best_for = ["Implementation and autonomous edits"]
+avoid_for = ["Security audit"]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Models — vendor-native CLIs (Grok Build, Muse Code, Qwen Code, Kimi CLI, Mistral Vibe)
+# ---------------------------------------------------------------------------
+
+[models."grok-build-4.7"]
+harness = "grok"
+cli_model = "grok-4.7"
+vendor_family = "xai"
+display_name = "Grok 4.7 (Grok Build)"
+tier = "deep"
+efforts = ["default"]
+default_effort = "default"
+cost_tier = "medium"
+cost_note = "~$2 / $6 per 1M tokens."
+speed_note = "Very fast response."
+context_window = 500000
+strengths = [
+  "Terminal-Bench 4 — 37.6% in its native Grok Build (24–29% in other harnesses)",
+  "Fast cyber recon without refusals",
+]
+weaknesses = [
+  "~29% hallucinations",
+  "Experimental adapter; MCP is not isolated",
+]
+best_for = ["Terminal tasks, fast repo recon, and triage"]
+avoid_for = ["Fact research and final review"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."muse-spark-1.3"]
+harness = "muse"
+cli_model = "muse-spark-1.3"
+vendor_family = "meta"
+display_name = "Muse Spark 1.3 (Muse Code)"
+tier = "deep"
+efforts = ["default"]
+default_effort = "default"
+cost_tier = "medium"
+cost_note = "Price not independently confirmed."
+speed_note = "Not measured."
+context_window = 200000
+strengths = [
+  "Meta's model in its native harness",
+  "Prompt via a file — no argv limit",
+]
+weaknesses = [
+  "Experimental adapter; few independent measurements",
+  "MCP is not isolated",
+]
+best_for = ["Second opinion from a different vendor"]
+avoid_for = ["Critical edits without review"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."qwen-cli-3.8-max"]
+harness = "qwen"
+cli_model = "qwen3.8-max"
+vendor_family = "alibaba"
+display_name = "Qwen 3.8 Max (Qwen Code)"
+tier = "standard"
+efforts = ["default"]
+default_effort = "default"
+cost_tier = "low"
+cost_note = "Cheap Qwen quota."
+speed_note = "Fast."
+context_window = 1000000
+strengths = [
+  "Qwen's native harness, 1M context",
+  "Prompt via stdin and MCP isolation via a flag",
+]
+weaknesses = [
+  "Experimental adapter",
+  "No effort selection",
+]
+best_for = ["Inexpensive implementation and repo recon"]
+avoid_for = ["Security audit"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."kimi-cli-k3.1-pro"]
+harness = "kimi"
+cli_model = "kimi-k3.1-pro"
+vendor_family = "moonshot"
+display_name = "Kimi K3.1 Pro (Kimi CLI)"
+tier = "deep"
+efforts = ["default"]
+default_effort = "default"
+cost_tier = "medium"
+cost_note = "Medium price."
+speed_note = "Slower than Flash models."
+context_window = 1000000
+strengths = [
+  "Moonshot's native harness, 1M context",
+  "Strong on long context",
+]
+weaknesses = [
+  "Experimental adapter; MCP is not isolated",
+  "Prompt via argv — ~100 KB limit",
+]
+best_for = ["Long context analysis"]
+avoid_for = ["Fast triage"]
+checked_at = "2026-11-25"
+enabled = true
+
+[models."vibe-devstral"]
+harness = "vibe"
+cli_model = "devstral"
+vendor_family = "mistral"
+display_name = "Devstral (Mistral Vibe)"
+tier = "standard"
+efforts = ["default"]
+default_effort = "default"
+cost_tier = "low"
+cost_note = "Cheap Mistral model."
+speed_note = "Fast."
+context_window = 256000
+strengths = [
+  "Mistral's coding model in its native harness",
+  "Low price",
+]
+weaknesses = [
+  "Experimental adapter; MCP is not isolated",
+  "Prompt via argv — ~100 KB limit",
+]
+best_for = ["Inexpensive implementation and small edits"]
+avoid_for = ["Architecture and security audit"]
+checked_at = "2026-11-25"
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Presets — role -> (harness, model, effort)
+# Every preset maps all 23 built-in roles. No preset uses `max` effort.
+# ---------------------------------------------------------------------------
+
+[presets.balanced]
+description = "Universal default preset: Claude writes, Codex reviews (a different vendor), DeepSeek Flash handles recon, Kimi K3.1 Pro covers large context, Gemini Argon covers facts and visual review. No max traps."
+enabled = true
+
+[presets.balanced.roles]
+architecture = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+research = { harness = "pi", model = "pi-gemini-4-argon", effort = "high" }
+codebase_qa = { harness = "claude", model = "claude-opus-5-5", effort = "medium" }
+repo_recon = { harness = "dsh", model = "deepseek-flash", effort = "low" }
+implementation = { harness = "claude", model = "claude-sonnet-5-5", effort = "high" }
+frontend = { harness = "codex", model = "gpt-6.2-sol", effort = "medium" }
+ui = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+ui_design = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+ui_review = { harness = "pi", model = "pi-gemini-4-argon", effort = "high" }
+deep_refactor = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+debugging = { harness = "codex", model = "gpt-6.2-sol", effort = "high" }
+root_cause = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+review = { harness = "codex", model = "gpt-6.2-sol", effort = "high" }
+second_opinion = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+security = { harness = "codex", model = "gpt-6.2-astra", effort = "high" }
+test_strategy = { harness = "claude", model = "claude-opus-5-5", effort = "medium" }
+testing = { harness = "codex", model = "gpt-6.2-sol", effort = "medium" }
+devops = { harness = "codex", model = "gpt-6.2-sol", effort = "medium" }
+performance = { harness = "codex", model = "gpt-6.2-sol", effort = "high" }
+data_sql = { harness = "claude", model = "claude-sonnet-5-5", effort = "high" }
+writing = { harness = "claude", model = "claude-opus-5-5", effort = "medium" }
+long_context = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+quick = { harness = "claude", model = "claude-haiku-5-5", effort = "low" }
+
+[presets.max-quality]
+description = "Maximum quality without max traps: Fable and Opus on high, Astra and Sol on xhigh, strict review by a different vendor, Kimi K3.1 Pro and Gemini Argon on large context and facts."
+enabled = true
+
+[presets.max-quality.roles]
+architecture = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+research = { harness = "pi", model = "pi-gemini-4-argon", effort = "high" }
+codebase_qa = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+repo_recon = { harness = "claude", model = "claude-sonnet-5-5", effort = "high" }
+implementation = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+frontend = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+ui = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+ui_design = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+ui_review = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+deep_refactor = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+debugging = { harness = "codex", model = "gpt-6.2-astra", effort = "xhigh" }
+root_cause = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+review = { harness = "codex", model = "gpt-6.2-astra", effort = "xhigh" }
+second_opinion = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+security = { harness = "codex", model = "gpt-6.2-astra", effort = "xhigh" }
+test_strategy = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+testing = { harness = "codex", model = "gpt-6.2-sol", effort = "xhigh" }
+devops = { harness = "codex", model = "gpt-6.2-sol", effort = "xhigh" }
+performance = { harness = "codex", model = "gpt-6.2-astra", effort = "xhigh" }
+data_sql = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+writing = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+long_context = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+quick = { harness = "claude", model = "claude-sonnet-5-5", effort = "medium" }
+
+[presets.budget]
+description = "Most results per dollar: DeepSeek Flash and V4 Pro (dsh, sandboxed), Kimi K2.7 Code, GLM-5.3, Qwen 3.8 Flash, MiniMax M3.1 Flash, MiMo v2.6 Pro; Kimi K3.1 Pro only for large context."
+enabled = true
+
+[presets.budget.roles]
+architecture = { harness = "dsh", model = "deepseek-v4-pro", effort = "high" }
+research = { harness = "dsh", model = "deepseek-v4-pro", effort = "high" }
+codebase_qa = { harness = "pi", model = "pi-glm-5.3", effort = "high" }
+repo_recon = { harness = "dsh", model = "deepseek-flash", effort = "low" }
+implementation = { harness = "pi", model = "pi-kimi-k2.7-code", effort = "medium" }
+frontend = { harness = "pi", model = "pi-kimi-k2.7-code", effort = "medium" }
+ui = { harness = "pi", model = "pi-qwen3.8-flash", effort = "medium" }
+ui_design = { harness = "pi", model = "pi-mimo-v2.6-pro", effort = "high" }
+ui_review = { harness = "pi", model = "pi-glm-5.3-flash", effort = "medium" }
+deep_refactor = { harness = "pi", model = "pi-glm-5.3", effort = "high" }
+debugging = { harness = "dsh", model = "deepseek-flash", effort = "high" }
+root_cause = { harness = "pi", model = "pi-glm-5.3", effort = "high" }
+review = { harness = "dsh", model = "deepseek-v4-pro", effort = "high" }
+second_opinion = { harness = "pi", model = "pi-mimo-v2.6-pro", effort = "high" }
+security = { harness = "pi", model = "pi-glm-5.3", effort = "high" }
+test_strategy = { harness = "dsh", model = "deepseek-v4-pro", effort = "high" }
+testing = { harness = "dsh", model = "deepseek-flash", effort = "high" }
+devops = { harness = "dsh", model = "deepseek-flash", effort = "high" }
+performance = { harness = "dsh", model = "deepseek-v4-pro", effort = "high" }
+data_sql = { harness = "pi", model = "pi-kimi-k2.7-code", effort = "medium" }
+writing = { harness = "pi", model = "pi-minimax-m3.1-flash", effort = "medium" }
+long_context = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+quick = { harness = "pi", model = "pi-minimax-m3.1-flash", effort = "low" }
+
+[presets.open-weights]
+description = "No Western proprietary models: DeepSeek, Kimi, GLM, Qwen 3.8, MiniMax, and MiMo across all 23 roles. Review and security go to a different lab than the code author."
+enabled = true
+
+[presets.open-weights.roles]
+architecture = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+research = { harness = "dsh", model = "deepseek-v4-pro", effort = "high" }
+codebase_qa = { harness = "pi", model = "pi-glm-5.3", effort = "high" }
+repo_recon = { harness = "dsh", model = "deepseek-flash", effort = "low" }
+implementation = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+frontend = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+ui = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+ui_design = { harness = "pi", model = "pi-mimo-v2.6-pro", effort = "high" }
+ui_review = { harness = "pi", model = "pi-qwen3.8-max", effort = "high" }
+deep_refactor = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+debugging = { harness = "dsh", model = "deepseek-flash", effort = "high" }
+root_cause = { harness = "pi", model = "pi-glm-5.3", effort = "high" }
+review = { harness = "pi", model = "pi-glm-5.3", effort = "high" }
+second_opinion = { harness = "dsh", model = "deepseek-v4-pro", effort = "high" }
+security = { harness = "pi", model = "pi-glm-5.3", effort = "high" }
+test_strategy = { harness = "dsh", model = "deepseek-v4-pro", effort = "high" }
+testing = { harness = "dsh", model = "deepseek-flash", effort = "high" }
+devops = { harness = "dsh", model = "deepseek-flash", effort = "high" }
+performance = { harness = "pi", model = "pi-glm-5.3", effort = "high" }
+data_sql = { harness = "pi", model = "pi-qwen3.8-max", effort = "medium" }
+writing = { harness = "pi", model = "pi-minimax-m3.1-flash", effort = "medium" }
+long_context = { harness = "dsh", model = "deepseek-v4-pro", effort = "high" }
+quick = { harness = "pi", model = "pi-minimax-m3.1-flash", effort = "low" }
+
+[presets.ui-sprint]
+description = "Interface sprint: Fable on design and UI, Sol on frontend code, Gemini Argon on visual review from screenshots, Qwen4 Max as a second opinion, Opus on architecture and independent review of Sol's code, Terra on fast checks."
+enabled = true
+
+[presets.ui-sprint.roles]
+architecture = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+research = { harness = "pi", model = "pi-gemini-4-argon", effort = "high" }
+codebase_qa = { harness = "claude", model = "claude-opus-5-5", effort = "medium" }
+repo_recon = { harness = "codex", model = "gpt-6.1-terra", effort = "medium" }
+implementation = { harness = "codex", model = "gpt-6.2-sol", effort = "medium" }
+frontend = { harness = "codex", model = "gpt-6.2-sol", effort = "high" }
+ui = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+ui_design = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+ui_review = { harness = "pi", model = "pi-gemini-4-argon", effort = "high" }
+deep_refactor = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+debugging = { harness = "codex", model = "gpt-6.2-sol", effort = "high" }
+root_cause = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+review = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+second_opinion = { harness = "pi", model = "pi-qwen4-max", effort = "high" }
+security = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+test_strategy = { harness = "claude", model = "claude-opus-5-5", effort = "medium" }
+testing = { harness = "codex", model = "gpt-6.1-terra", effort = "medium" }
+devops = { harness = "codex", model = "gpt-6.1-terra", effort = "medium" }
+performance = { harness = "codex", model = "gpt-6.2-sol", effort = "high" }
+data_sql = { harness = "claude", model = "claude-sonnet-5-5", effort = "high" }
+writing = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+long_context = { harness = "pi", model = "pi-gemini-4-argon", effort = "medium" }
+quick = { harness = "codex", model = "gpt-6.1-terra", effort = "low" }
+
+[presets.security-audit]
+description = "Defensive security audit: Opus on high and Astra on xhigh check each other, GLM-5.3 gives a second opinion from a different lab, Grok 4.7 on low does fast readonly recon without refusals, Sol handles the terminal, Kimi K3.1 Pro covers large context."
+enabled = true
+
+[presets.security-audit.roles]
+architecture = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+research = { harness = "codex", model = "gpt-6.2-astra", effort = "high" }
+codebase_qa = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+repo_recon = { harness = "pi", model = "pi-grok-4.7", effort = "low" }
+implementation = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+frontend = { harness = "claude", model = "claude-sonnet-5-5", effort = "high" }
+ui = { harness = "claude", model = "claude-sonnet-5-5", effort = "high" }
+ui_design = { harness = "claude", model = "claude-opus-5-5", effort = "medium" }
+ui_review = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+deep_refactor = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+debugging = { harness = "codex", model = "gpt-6.2-sol", effort = "xhigh" }
+root_cause = { harness = "codex", model = "gpt-6.2-astra", effort = "xhigh" }
+review = { harness = "codex", model = "gpt-6.2-astra", effort = "xhigh" }
+second_opinion = { harness = "pi", model = "pi-glm-5.3", effort = "high" }
+security = { harness = "codex", model = "gpt-6.2-astra", effort = "xhigh" }
+test_strategy = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+testing = { harness = "codex", model = "gpt-6.2-sol", effort = "high" }
+devops = { harness = "codex", model = "gpt-6.2-sol", effort = "xhigh" }
+performance = { harness = "codex", model = "gpt-6.2-sol", effort = "high" }
+data_sql = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+writing = { harness = "claude", model = "claude-opus-5-5", effort = "medium" }
+long_context = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+quick = { harness = "claude", model = "claude-haiku-5-5", effort = "low" }
+
+[presets.deep-refactor]
+description = "Large multi-file migrations and refactors: Fable on high makes the change, Kimi K3.1 Pro holds the repository map in 1M, Astra and Sol on xhigh handle debugging and tests, and Astra also does the independent review from another vendor."
+enabled = true
+
+[presets.deep-refactor.roles]
+architecture = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+research = { harness = "pi", model = "pi-gemini-4-argon", effort = "high" }
+codebase_qa = { harness = "claude", model = "claude-opus-5-5", effort = "medium" }
+repo_recon = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+implementation = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+frontend = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+ui = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+ui_design = { harness = "claude", model = "claude-opus-5-5", effort = "medium" }
+ui_review = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+deep_refactor = { harness = "claude", model = "claude-fable-5-2", effort = "high" }
+debugging = { harness = "codex", model = "gpt-6.2-sol", effort = "xhigh" }
+root_cause = { harness = "codex", model = "gpt-6.2-astra", effort = "xhigh" }
+review = { harness = "codex", model = "gpt-6.2-astra", effort = "xhigh" }
+second_opinion = { harness = "codex", model = "gpt-6.2-astra", effort = "xhigh" }
+security = { harness = "codex", model = "gpt-6.2-astra", effort = "high" }
+test_strategy = { harness = "claude", model = "claude-opus-5-5", effort = "high" }
+testing = { harness = "codex", model = "gpt-6.2-sol", effort = "xhigh" }
+devops = { harness = "codex", model = "gpt-6.2-sol", effort = "high" }
+performance = { harness = "codex", model = "gpt-6.2-astra", effort = "xhigh" }
+data_sql = { harness = "codex", model = "gpt-6.2-sol", effort = "high" }
+writing = { harness = "claude", model = "claude-sonnet-5-5", effort = "medium" }
+long_context = { harness = "pi", model = "pi-kimi-k3.1-pro", effort = "high" }
+quick = { harness = "claude", model = "claude-haiku-5-5", effort = "medium" }
+
+[presets.fast-sprint]
+description = "Minimal latency and fast iterations: Sonnet and Sol on medium, Haiku and Terra on small tasks, DeepSeek Flash, GLM-5.3 Highspeed, MiniMax M3.1 Flash, and Grok 4.7 on low."
+enabled = true
+
+[presets.fast-sprint.roles]
+architecture = { harness = "claude", model = "claude-sonnet-5-5", effort = "medium" }
+research = { harness = "dsh", model = "deepseek-flash", effort = "low" }
+codebase_qa = { harness = "claude", model = "claude-haiku-5-5", effort = "medium" }
+repo_recon = { harness = "pi", model = "pi-grok-4.7", effort = "low" }
+implementation = { harness = "claude", model = "claude-sonnet-5-5", effort = "medium" }
+frontend = { harness = "codex", model = "gpt-6.2-sol", effort = "medium" }
+ui = { harness = "claude", model = "claude-sonnet-5-5", effort = "medium" }
+ui_design = { harness = "codex", model = "gpt-6.1-terra", effort = "medium" }
+ui_review = { harness = "codex", model = "gpt-6.1-terra", effort = "medium" }
+deep_refactor = { harness = "codex", model = "gpt-6.2-sol", effort = "medium" }
+debugging = { harness = "codex", model = "gpt-6.2-sol", effort = "medium" }
+root_cause = { harness = "claude", model = "claude-sonnet-5-5", effort = "medium" }
+review = { harness = "codex", model = "gpt-6.2-sol", effort = "medium" }
+second_opinion = { harness = "pi", model = "pi-glm-5.3-highspeed", effort = "low" }
+security = { harness = "codex", model = "gpt-6.2-sol", effort = "medium" }
+test_strategy = { harness = "claude", model = "claude-sonnet-5-5", effort = "medium" }
+testing = { harness = "codex", model = "gpt-6.1-terra", effort = "medium" }
+devops = { harness = "codex", model = "gpt-6.2-sol", effort = "medium" }
+performance = { harness = "codex", model = "gpt-6.2-sol", effort = "medium" }
+data_sql = { harness = "claude", model = "claude-sonnet-5-5", effort = "medium" }
+writing = { harness = "pi", model = "pi-minimax-m3.1-flash", effort = "low" }
+long_context = { harness = "dsh", model = "deepseek-flash", effort = "low" }
+quick = { harness = "claude", model = "claude-haiku-5-5", effort = "low" }

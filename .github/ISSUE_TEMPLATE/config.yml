@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/nazavod777/agent-router-mcp/security/advisories/new
+    about: Please report security problems privately. Do not open a public issue.
+  - name: Documentation and setup guide
+    url: https://github.com/nazavod777/agent-router-mcp/blob/main/docs/AI_AGENT_GUIDE.md
+    about: Step-by-step playbooks for install, configuration, and troubleshooting.

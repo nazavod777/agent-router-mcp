@@ -1,0 +1,21 @@
+# Sparse preset role override for agent-router-mcp.
+#
+# Changes ONE role of the built-in `balanced` preset; all other roles and
+# presets stay inherited from defaults/catalog.toml.
+#
+# Invariants (checked on load; a violation silently falls back and shows up
+# in `config_warnings`):
+#   - `harness` MUST equal models.<model>.harness
+#   - `effort`  MUST be one of models.<model>.efforts
+#
+# CLI equivalent (one atomic command):
+#   agrmcp config set presets.balanced.roles.quick '{"harness":"claude","model":"claude-sonnet-5-5","effort":"medium"}'
+#
+# Verified by tests/unit/docs-examples.test.ts.
+
+schema_version = 1
+
+[presets.balanced.roles.quick]
+harness = "claude"
+model = "claude-sonnet-5-5"
+effort = "medium"

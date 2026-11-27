@@ -1,0 +1,60 @@
+{
+  "name": "agent-router-mcp",
+  "version": "0.1.0",
+  "description": "Local stdio MCP server that routes subtasks across 17 coding CLI harnesses (Claude Code, Codex, Gemini, OpenCode, and more) with plan validation, git worktree isolation, and a Settings UI.",
+  "license": "MIT",
+  "author": "nazavod777",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nazavod777/agent-router-mcp.git"
+  },
+  "homepage": "https://github.com/nazavod777/agent-router-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/nazavod777/agent-router-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "orchestrator",
+    "agent-router",
+    "multi-model",
+    "claude",
+    "codex",
+    "gemini",
+    "opencode",
+    "cli"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "bin": {
+    "agrmcp": "./dist/cli/main.js"
+  },
+  "files": [
+    "dist/",
+    "defaults/",
+    "skills/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node -e \"import('fs').then(f=>f.rmSync('dist',{recursive:true,force:true}))\" && tsc && node -e \"import('fs').then(f=>{f.mkdirSync('dist/settings-ui',{recursive:true}); if(f.existsSync('src/settings-ui/app.html')) f.copyFileSync('src/settings-ui/app.html','dist/settings-ui/app.html'); for(const b of ['main','mcp']) if(f.existsSync('dist/cli/'+b+'.js')) f.chmodSync('dist/cli/'+b+'.js',0o755);})\"",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build && npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "smol-toml": "^1.9.1",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.1"
+  }
+}

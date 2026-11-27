@@ -1,0 +1,45 @@
+# Custom wrapper harness + custom model card for agent-router-mcp.
+#
+# `custom = true` turns OFF inheritance from defaults/catalog.toml for that
+# entity, so every required schema field must be present (see
+# src/config/schema.ts and docs/AI_AGENT_GUIDE.md section 6). A custom entity
+# with a missing or invalid field is quarantined on its own; the rest of the
+# user config still applies.
+#
+# Merge these tables into the "User config" printed by `agrmcp config path`.
+# Replace `binary` with the absolute path of your real wrapper script.
+#
+# Verified by tests/unit/docs-examples.test.ts.
+
+schema_version = 1
+
+[harnesses.claude-custom]
+custom = true
+driver = "claude"                          # one of DRIVER_KINDS in src/drivers.ts
+display_name = "Claude Code (custom wrapper)"
+binary = "/usr/local/bin/claude-wrapper"   # absolute path; GUI hosts may not see your shell PATH
+enabled = true
+write_permission_mode = "acceptEdits"      # claude driver accepts "acceptEdits" or "auto"
+inherit_mcp = false                        # omit to follow [defaults] inherit_mcp
+extra_args = []
+# model_discovery = "wrapper"              # unset = "manual" for a wrapper: `agrmcp models discover` never runs it
+
+[models."claude-custom-sonnet"]
+custom = true
+harness = "claude-custom"                  # must be an existing harness id
+cli_model = "claude-sonnet-5-5"            # model name passed to the CLI (defaults to the card id)
+vendor_family = "anthropic"                # used for cross-vendor review checks
+display_name = "Claude Sonnet 5.5 (custom wrapper)"
+tier = "standard"                          # deep | standard | light | specialist
+efforts = ["low", "medium", "high", "xhigh", "max"]  # copied from the closest built-in card
+default_effort = "high"                    # must be one of efforts
+cost_tier = "medium"                       # low | medium | high | premium
+cost_note = "Same pricing as the built-in claude-sonnet-5-5 card."
+speed_note = "Same speed as the built-in claude-sonnet-5-5 card."
+context_window = 200000                    # copied from the closest built-in card
+strengths = ["Implementation against a clear spec"]
+weaknesses = ["Runs through a local wrapper; check the wrapper when runs fail"]
+best_for = ["Implementation through a local wrapper"]
+avoid_for = ["Tasks that need the stock claude harness"]
+checked_at = "2026-11-25"                  # ISO date (YYYY-MM-DD)
+enabled = true

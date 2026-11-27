@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install dependencies
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm test
+      - name: Verify package tarball contents
+        shell: bash
+        run: |
+          npm pack --dry-run --json | node -e '
+            let raw = "";
+            process.stdin.on("data", (chunk) => (raw += chunk)).on("end", () => {
+              const files = JSON.parse(raw)[0].files.map((file) => file.path);
+              const required = ["dist/cli/main.js", "defaults/catalog.toml", "skills/orchestrate/SKILL.md"];
+              const missing = required.filter((path) => !files.includes(path));
+              const leaked = files.filter((path) => path.startsWith("tests/") || path.startsWith("src/"));
+              if (missing.length > 0 || leaked.length > 0) {
+                console.error("Tarball check failed", { missing, leaked });
+                process.exit(1);
+              }
+              console.log("Tarball OK: " + files.length + " files");
+            });
+          '
+
+  windows:
+    name: windows (node 22)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm pack --dry-run
+      # Only tests that do not rely on POSIX shell-shebang fixtures run on Windows.
+      - name: Cross-platform unit tests
+        run: npx vitest run tests/unit/config.test.ts tests/unit/probe-utils.test.ts tests/unit/cli-naming.test.ts tests/unit/docs-examples.test.ts tests/unit/planner.test.ts tests/unit/mcp-input.test.ts

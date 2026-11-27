@@ -1,0 +1,20 @@
+# Minimal sparse user override for agent-router-mcp.
+#
+# Copy to the "User config" path printed by `agrmcp config path`
+# (default: ~/.config/orchestrator-mcp/models.toml), or apply the same
+# changes with `agrmcp config set ...`. Store ONLY the fields you change;
+# everything else is inherited from defaults/catalog.toml.
+#
+# Verified by tests/unit/docs-examples.test.ts.
+
+schema_version = 1
+
+[defaults]
+locale = "en"              # "en" (default) or "ru"
+max_concurrency = 2        # parallel jobs (positive integer)
+default_timeout_sec = 600  # explicit override below the 900s default (max_timeout_sec defaults to 3600)
+
+# Disable a harness you do not use. Presets that point at it fall back to
+# an installed, enabled alternative during orch_plan_preview.
+[harnesses.kiro]
+enabled = false
