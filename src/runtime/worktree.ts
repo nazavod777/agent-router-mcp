@@ -2,12 +2,13 @@ import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { link, lstat, mkdir, open, readFile, realpath, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { setTimeout } from "node:timers/promises";
 import { promisify } from "node:util";
 import { getLocksDir, getWorktreesDir } from "../config/paths.js";
 import { redactSecrets } from "../logging.js";
 import type { RunMode, StructuredError, WorktreeInfo } from "../types.js";
-import { filterOverrides, gitExecutable, IGNORE_SUBMODULES, isInsidePath, isolatedGitEnvironment, NULL_DEVICE } from "./guard.js";
+import { filterOverrides, gitInvocation, IGNORE_SUBMODULES, isInsidePath, isolatedGitEnvironment, NULL_DEVICE } from "./guard.js";
 import { redactionLookahead, truncateUtf8, utf8PrefixLength } from "./output.js";
 
 const execFileAsync = promisify(execFile);
@@ -81,13 +82,15 @@ interface GitOptions {
 }
 
 async function runGit(cwd: string, args: string[], opts: GitOptions): Promise<string> {
-  const { stdout } = await execFileAsync(gitExecutable(), [...GIT_OPTIONS, ...args], {
+  const invocation = gitInvocation([...GIT_OPTIONS, ...args]);
+  const { stdout } = await execFileAsync(invocation.command, invocation.args, {
     cwd,
     env: isolatedGitEnvironment(opts.jobId),
     timeout: GIT_TIMEOUT_MS,
     killSignal: "SIGKILL",
     maxBuffer: 4 * 1024 * 1024,
     signal: opts.signal,
+    windowsHide: true,
   });
   return stdout;
 }
@@ -235,12 +238,17 @@ async function createPrivateDirectory(path: string): Promise<void> {
   if (await realpath(path) !== path) throw new Error(`Unexpected symbolic link in worktree storage: ${path}.`);
 }
 
+/** Drops the one line ending Git prints after a path: `\n`, or `\r\n` where Git runs with CRLF output. */
+function stripLineEnd(output: string): string {
+  return output.replace(/\r?\n$/, "");
+}
+
 async function verifyCheckout(cwd: string, commonDir: string, opts: GitOptions = {}): Promise<void> {
   const [top, common] = await Promise.all([
     git(cwd, ["rev-parse", "--show-toplevel"], opts),
     git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], opts),
   ]);
-  if (await realpath(top.slice(0, -1)) !== cwd || await realpath(common.slice(0, -1)) !== commonDir) {
+  if (await realpath(stripLineEnd(top)) !== cwd || await realpath(stripLineEnd(common)) !== commonDir) {
     throw new Error("Checkout does not belong to the expected Git repository.");
   }
 }
@@ -384,33 +392,57 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<{
  * Reads `git diff` redacted BEFORE it is clipped to `maxBytes`: the read window extends past the cap, so a secret that
  * straddles the cap is replaced whole. If even the window is cut, its incomplete last token is discarded.
  */
+const MAX_DIFF_STDERR_CHARS = 4096;
+
+/**
+ * The reportable tail of git's stderr. It is redacted BEFORE it is cut to size, so a secret that starts near the beginning
+ * of the kept window is masked whole; when the window itself was cut, its first (possibly partial) word is dropped.
+ */
+export function reportedStderr(window: string, windowCut: boolean, extraSecrets: string[]): string {
+  const whole = windowCut ? window.replace(/^\S{1,512}/, "") : window;
+  return redactSecrets(whole, extraSecrets).slice(-MAX_DIFF_STDERR_CHARS);
+}
+
 async function readDiff(
   cwd: string, base: string, maxBytes: number, extraSecrets: string[], opts: GitOptions,
 ): Promise<{ diff: string; truncated: boolean }> {
   const overrides = await localFilterOverrides(cwd, opts);
-  const child = spawn(gitExecutable(), [...GIT_OPTIONS, ...overrides, "diff", "--no-ext-diff", "--no-textconv", IGNORE_SUBMODULES, base, "--"], {
+  const invocation = gitInvocation([...GIT_OPTIONS, ...overrides, "diff", "--no-ext-diff", "--no-textconv", IGNORE_SUBMODULES, base, "--"]);
+  const child = spawn(invocation.command, invocation.args, {
     cwd,
     env: isolatedGitEnvironment(opts.jobId),
     timeout: GIT_TIMEOUT_MS,
     killSignal: "SIGKILL",
     signal: opts.signal,
+    windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
   const windowBytes = maxBytes + redactionLookahead(extraSecrets);
   const chunks: Buffer[] = [];
   let kept = 0;
+  // Raw stderr window: wider than what is reported, so a secret near its start is still whole when it is redacted.
+  const stderrWindowChars = MAX_DIFF_STDERR_CHARS + redactionLookahead(extraSecrets);
   let stderr = "";
+  let stderrCut = false;
+  const keepStderr = (text: string): void => {
+    const joined = stderr + text;
+    stderrCut ||= joined.length > stderrWindowChars;
+    stderr = joined.slice(-stderrWindowChars);
+  };
+  // A multi-byte character split across two chunks must not turn into replacement characters.
+  const stderrDecoder = new StringDecoder("utf8");
   child.stdout.on("data", (chunk: Buffer) => {
     const keep = Math.min(chunk.length, windowBytes + 1 - kept);
     if (keep > 0) chunks.push(chunk.subarray(0, keep));
     kept += keep;
   });
-  child.stderr.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4096); });
+  child.stderr.on("data", (chunk: Buffer) => keepStderr(stderrDecoder.write(chunk)));
   await new Promise<void>((resolveExit, reject) => {
     child.on("error", reject);
     child.once("close", (code) => {
+      keepStderr(stderrDecoder.end());
       if (code === 0) resolveExit();
-      else reject(new Error(`git diff failed: ${stderr.trim() || code || "terminated"}`));
+      else reject(new Error(`git diff failed: ${reportedStderr(stderr, stderrCut, extraSecrets).trim() || code || "terminated"}`));
     });
   });
   // The lookahead byte identifies whether the read window itself was cut.

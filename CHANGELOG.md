@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-28
+
+Windows and cross-platform hardening release.
+
+### Added
+
+- Windows hardening: hidden headless spawns (`windowsHide: true`, no `detached` console flash) and `terminateWindowsTree`, which runs `taskkill` and then verifies through the Windows process table that no descendant survived.
+- Antigravity `GEMINI_HOME` override and automatic discovery of T3 Code isolated profiles (`antigravity:t3:<id>`; `--target antigravity:primary` for primary-only repairs), with deduplication and symlink containment guards.
+- Codex `SANDBOX_UNAVAILABLE` detection on Windows with 600 s harness cooldown, `details.hints`, and `agrmcp doctor` `platform_warnings` and `claude_readonly_forwarded_env`.
+- Claude `readonly` (`--restricted`) forwarding of a strict allowlist of user-level `settings.json` auth/endpoint variables (group gate, repo/worktree rejection; proxy/CA/custom-header variables never forwarded).
+- Expanded `AUTH_PATTERNS` / `FAILURE_CLASSES` (for example `Failed to authenticate: OAuth session expired`).
+- Env-dir and config parity for OpenCode (explicit `OPENCODE_CONFIG`), DSH, Gemini (`GEMINI_CLI_HOME`), Pi, fx (`FX_HOME`), Qwen (`QWEN_HOME`), Kimi (`KIMI_CODE_HOME`), Codex top-level `profile`, and CLI limit discovery.
+- Offline test suite grown to 52 files and 2,685 tests, including Windows process-tree, sandbox, env-case, and T3 profile coverage.
+
+### Fixed
+
+- Settings UI `argvEditor` now preserves whitespace inside arguments.
+- Streaming and chunk-boundary secret redaction in Claude readonly output buffers.
+- Windows environment-variable case handling across probes, adapters, and CLI limit discovery.
+
+### Security
+
+- OpenCode (V1/V2 JSONC, including `.opencode/`) and DSH (`cordis.patch.yml`, active profile patches, `@deepseek-ai/dsh-mcp-client` plugins) join `copilot` and `codex` in fail-closed MCP isolation.
+- Claude `--restricted` stays intact: auth forwarding is allowlist-only, user-level only, and never reads project files.
+- Codex Windows sandbox failures are reported, never worked around by weakening sandbox flags.
+
 ## [0.1.0] - 2026-11-27
 
 First open-source release.
@@ -34,5 +60,6 @@ First open-source release.
 - Settings UI: loopback-only binding, `Host` validation, one-time bootstrap token with a 5-minute TTL, `HttpOnly; SameSite=Strict` cookie, `Sec-Fetch-Site: same-origin`, and an `X-Orch-Token` required on all `/api/*` calls.
 - Zero telemetry: no outbound network requests from the router itself.
 
-[Unreleased]: https://github.com/nazavod777/agent-router-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/nazavod777/agent-router-mcp/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/nazavod777/agent-router-mcp/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/nazavod777/agent-router-mcp/releases/tag/v0.1.0

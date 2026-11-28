@@ -54,8 +54,9 @@ export type DiscoveryConfig = Pick<ConfigSnapshot, "harnesses" | "models" | "ali
 
 /**
  * True for a user-made wrapper: marked `custom`, or its binary is anything but the driver's own executable looked up by
- * bare name. A path (`./tools/pi`, `/opt/x/pi`) is a wrapper even when its file name matches; it may be listed only after
- * an explicit `model_discovery = "native"` or `"wrapper"`.
+ * bare name. A path (`./tools/pi`, `/opt/x/pi`) is a wrapper even when its file name matches. An explicit
+ * `model_discovery = "native"` makes it read the driver's local model sources only; running the binary to list models
+ * (Layer 2 probe) additionally requires `model_discovery = "wrapper"`.
  */
 export function isCustomHarness(harness: Pick<HarnessConfig, "driver" | "binary" | "custom">): boolean {
   return harness.custom === true || !isStockBinary(harness.driver, harness.binary);

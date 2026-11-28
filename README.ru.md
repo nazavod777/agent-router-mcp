@@ -42,7 +42,7 @@
 | 🧠 **Анти-хайп каталог по умолчанию** | 43 модели от 12 лабораторий, 23 роли и 8 универсальных пресетов с честными слабостями, кросс-вендорным ревью, авто-фоллбэком с неустановленных CLI и без ловушки `max` |
 | 🎛️ **Настройки в стиле Technical Ledger** | веб-редактор (`agrmcp settings`) без внешних зависимостей: операционные таблицы, текущее состояние harness и готовность к делегированию, матрица пресетов в режиме «список и детали», полный редактор `[defaults]`, боковая панель проверки обнаруженных моделей, поля harness и моделей с учётом драйвера, собственные тематические выпадающие списки, постоянная панель сохранения со статусом, подсказки о правилах сохранения, фавиконка, поиск `/` и строгая офлайн CSP с nonce |
 | 🛡️ **Защищённый запуск** | запуск только по argv (без shell), анти-рекурсия `ORCH_DEPTH`, проверка идентичности бинарников (`fx`/`agent`), контроль `readonly`, зачистка групп процессов и внуков, вычистка секретов и лимиты вывода |
-| 🧪 **Офлайновый набор тестов** | 2,150 тестов в 47 файлах: все 17 драйверов, интеграция на заглушках CLI, редакторы конфигов `agrmcp setup` / `agrmcp mcp`, параллелизм по сессиям и таймауты с учётом активности, безопасность Web UI, бюджет каталога, примеры TOML, `agrmcp wait`, обнаружение лимитов CLI, обнаружение моделей, карантин конфига, чекпоинты, мягкая проверка входных данных MCP и реальный `stdio` MCP smoke |
+| 🧪 **Офлайновый набор тестов** | 2,685 теста в 52 файлах: все 17 драйверов, случаи Windows (дерево процессов, песочница, регистр переменных окружения, профили T3 Code), интеграция на заглушках CLI, редакторы конфигов `agrmcp setup` / `agrmcp mcp`, параллелизм по сессиям и таймауты с учётом активности, безопасность Web UI, бюджет каталога, примеры TOML, `agrmcp wait`, обнаружение лимитов CLI, обнаружение моделей, карантин конфига, чекпоинты, мягкая проверка входных данных MCP и реальный `stdio` MCP smoke |
 
 ## 🎯 Что решает
 
@@ -116,7 +116,8 @@ codex mcp add orchestrator -- "$(command -v node)" "/abs/path/to/agent-router-mc
 <tr><td width="260"><img src="assets/c-antigravity.svg" height="20" align="absmiddle" alt="Antigravity"> <img src="assets/c-gemini.svg" height="20" align="absmiddle" alt="Gemini"><br><sub>Вручную: Antigravity или Gemini CLI (<code>--scope user</code> = все проекты)</sub></td><td>
 
 ```bash
-# Antigravity читает ~/.gemini/config/mcp_config.json (устаревший путь: ~/.gemini/antigravity/mcp_config.json)
+# Antigravity читает ~/.gemini/config/mcp_config.json (устаревший путь: ~/.gemini/antigravity/mcp_config.json; GEMINI_HOME заменяет ~/.gemini)
+# `agrmcp setup` также находит изолированные профили T3 Code (antigravity:t3:<id>); --target antigravity:primary чинит только основной
 agy mcp add orchestrator -- "$(command -v node)" "/abs/path/to/agent-router-mcp/dist/cli/main.js" mcp
 gemini mcp add --scope user orchestrator "$(command -v node)" "/abs/path/to/agent-router-mcp/dist/cli/main.js" mcp
 ```
@@ -421,7 +422,7 @@ agrmcp models discover --apply --all-new --revision <rev>   # каждая но�
 
 - 🔁 **Анти-рекурсия:** дочерние процессы получают `ORCH_DEPTH` и `ORCH_JOB_ID`; превышение `orch_max_depth` (по умолчанию `1`) сразу отклоняется ошибкой `RECURSION_BLOCKED`.
 - 🪪 **Проверка бинарников и argv:** пробы отличают Vercel `fx` от JSON-просмотрщика `antonmedv/fx` и проверяют версию `agent` для Cursor; argv-драйверы ограничивают промпт 100 КиБ (`PROMPT_TOO_LARGE`) и отклоняют `extra_args`, ослабляющие `readonly` (`SANDBOX_POLICY_VIOLATION`).
-- ⚙️ **Зачистка дерева процессов:** каждый CLI запускается напрямую через argv (без shell) в собственной группе процессов. В POSIX при отмене, таймауте и штатном завершении группа получает `SIGTERM` → `SIGKILL`; на Linux дополнительно вычищаются отбившиеся внуки через `/proc` по `ORCH_JOB_ID` / `ORCH_JOB_CHAIN`, а macOS опирается на POSIX-группы процессов. В Windows завершение идёт через `taskkill /T` (затем `/T /F`, с запасным `process.kill(pid)`, если `taskkill` недоступен), а не через группы процессов.
+- ⚙️ **Зачистка дерева процессов:** каждый CLI запускается напрямую через argv (без shell) в собственной группе процессов. В POSIX при отмене, таймауте и штатном завершении группа получает `SIGTERM` → `SIGKILL`; на Linux дополнительно вычищаются отбившиеся внуки через `/proc` по `ORCH_JOB_ID` / `ORCH_JOB_CHAIN`, а macOS опирается на POSIX-группы процессов. В Windows CLI запускаются скрыто и без консоли (`windowsHide: true`, без вспышки `detached`-консоли), а завершение идёт через `taskkill /T` (затем `/T /F`, с запасным `process.kill(pid)`, если `taskkill` недоступен) с последующей проверкой потомков по таблице процессов Windows, а не через группы процессов. Если Codex в Windows не может запустить свою ОС-песочницу, возвращается `SANDBOX_UNAVAILABLE`; флаги песочницы никогда не ослабляются.
 - 🌿 **Изоляция путей и сверка плана:** worktree создаются внутри `ORCH_STATE_DIR`; рабочие каталоги проверяются по `ORCH_ALLOWED_ROOTS`; строгий `require_plan_id` (по умолчанию `false`) сверяет параметры запуска и ревизию конфига с действительной строкой `orch_plan_preview`.
 - 🌐 **Защищённый localhost Web UI:** слушает только `127.0.0.1` на случайном порту со строгой проверкой `Host` (защита от DNS rebinding); меняет одноразовый токен (действует 5 минут после запуска) на cookie `HttpOnly; SameSite=Strict`; передаёт странице привязанный к origin `X-Orch-Token` только во фрагменте URL одноразового редиректа (`/#t=<token>`: он не уходит по HTTP и никогда не содержится в отдаваемом HTML; страница хранит его в `sessionStorage`, изолированном по origin и порту, и сразу убирает фрагмент из адреса) и требует его вместе с cookie в **каждом** вызове `/api/*`, включая чтение, например `GET /api/state` и `/api/health`; отклоняет любой запрос браузера, у которого `Sec-Fetch-Site` не равен `same-origin`; на запись дополнительно проверяет точный `Origin` + `Content-Type: application/json` + лимит 256 КиБ, а также CSP с nonce и ноль CORS; сам выключается через 15 минут простоя (открытая вкладка шлёт heartbeat).
 - 🕶️ **Вычистка секретов:** значения переменных окружения с `KEY`, `TOKEN`, `SECRET`, `PASSWORD` или `CREDENTIAL`, а также `Bearer`-токены и заголовки `Authorization` удаляются из логов, сводок, диффов и ошибок; буквальная вычистка значений окружения срабатывает на секретные значения длиной не менее 8 символов. Конфиг, файлы промптов и бэкапы пишутся с правами `0600`.
@@ -447,7 +448,7 @@ agrmcp models discover --apply --all-new --revision <rev>   # каждая но�
 - 📏 **Лимит argv-промпта:** CLI, принимающие промпт только через argv (`antigravity`, `cursor`, `grok`, `kiro`, `fx`, `copilot`, `kimi`, `vibe`), ограничены 100 КиБ (`PROMPT_TOO_LARGE`) из-за Linux `MAX_ARG_STRLEN`; для огромных промптов используй stdin/file-драйверы (`claude`, `codex`, `dsh`, `pi`, `opencode`, `gemini`, `qwen`, `muse`, `droid`).
 - 🔁 **Пределы фейловера:** кулдауны действуют только в текущей сессии MCP-сервера; неклассифицированные сбои приходят как `NON_ZERO_EXIT` / `PARSE_ERROR` с точным `raw_error`, и решение принимает агент. Если упали все харнессы, действует правило HARD STOP: прекрати всю основную работу, сохрани незакоммиченные правки и worktree и сообщи пользователю о каждом заблокированном харнессе, дословные ошибки и варианты восстановления.
 - <img src="assets/c-git.svg" height="20" align="absmiddle" alt="Git"> Изолированные worktree стартуют от `HEAD` — незакоммиченные правки из родительской рабочей копии в дочерние worktree намеренно не копируются.
-- <img src="assets/c-macos.svg" height="20" align="absmiddle" alt="macOS"> <img src="assets/c-windows.svg" height="20" align="absmiddle" alt="Windows"> Поиск отбившихся процессов-внуков через `/proc` + `ORCH_JOB_CHAIN` работает только на Linux; macOS опирается на POSIX-группы процессов, а Windows использует `taskkill /T` (затем `/T /F`, с запасным `process.kill(pid)`) вместо групп процессов.
+- <img src="assets/c-macos.svg" height="20" align="absmiddle" alt="macOS"> <img src="assets/c-windows.svg" height="20" align="absmiddle" alt="Windows"> Поиск отбившихся процессов-внуков через `/proc` + `ORCH_JOB_CHAIN` работает только на Linux; macOS опирается на POSIX-группы процессов, а Windows использует `taskkill /T` (затем `/T /F`, с запасным `process.kill(pid)`) и проверку потомков после выхода вместо групп процессов. Claude `readonly` (`--restricted`) пробрасывает только строгий белый список переменных авторизации и эндпоинта из пользовательского `settings.json` (никогда не из файлов проекта, прокси/CA/кастомных заголовков), а `--restricted` не ослабляется.
 
 ## ✅ Статус тестирования
 
@@ -464,7 +465,7 @@ npm run build && npm run typecheck && npm test
 | 🔒 **Безопасность Web UI** | DNS rebinding (`Host`), одноразовый токен → cookie, `Origin`/CSRF/`Content-Type`/лимит тела, конфликты 409, динамический `supported_drivers`, бэкапы сброса, предпросмотр и импорт обнаружения моделей с восстановлением после конфликта 409 и истечения срока 410 |
 | 📡 **MCP stdio smoke** | Реальный запуск JSON-RPC `stdio`-сервера, `tools/list`, пагинация каталога из 17 харнессов в лимите 24 КБ, `orch_plan_preview`, `orch_run` → `orch_status` |
 
-Офлайновый набор содержит **2,150 тестов в 47 файлах**.
+Офлайновый набор содержит **2,685 теста в 52 файлах**, включая покрытие Windows (дерево процессов, песочница, регистр переменных окружения, профили T3 Code).
 
 ## 🗂️ Структура
 
@@ -481,7 +482,7 @@ npm run build && npm run typecheck && npm test
 | <img src="assets/c-mcp.svg" height="20" align="absmiddle" alt="MCP"> | `src/mcp/` и `src/cli/` | `stdio` MCP-сервер, 6 обработчиков инструментов, единый CLI `agrmcp`, установщик `agrmcp setup` / `agrmcp mcp`, `agrmcp models discover`, мягкая проверка входных данных |
 | 🎛️ | `src/settings-ui/` | Защищённый localhost HTTP-сервер и визуальный HTML/JS-редактор без зависимостей |
 | 🎨 | [`DESIGN.md`](DESIGN.md) | Визуальные токены, компоновка и правила взаимодействия UI настроек |
-| 🧪 | `tests/` | 2,150 офлайновых тестов в 47 файлах (юнит, `agrmcp wait`, примеры TOML, адаптеры, обнаружение моделей, безопасность UI, MCP smoke) |
+| 🧪 | `tests/` | 2,685 офлайновых теста в 52 файлах (юнит, `agrmcp wait`, примеры TOML, адаптеры, обнаружение моделей, безопасность UI, MCP smoke) |
 | 🎨 | `assets/` | SVG для README |
 | 🤖 | `AGENTS.md` | Короткие инструкции для AI-агентов: какую задачу они решают, жёсткие ограничения, быстрые сценарии |
 | 🤖 | `CLAUDE.md` | Направляет Claude Code к `AGENTS.md` |

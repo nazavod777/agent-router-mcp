@@ -44,6 +44,12 @@ const PROBE_CLOSE_WAIT_MS = 500;
 /** A timed-out probe is ended at once: no graceful window, then a forced kill of the whole tree. */
 const PROBE_TERMINATE_GRACE_MS = 0;
 const DEFAULT_PATHEXT = [".exe", ".com", ".cmd", ".bat"];
+/** PowerShell scripts: never started directly (`spawn` cannot run them without a shell) and never an implicit PATHEXT candidate. */
+const POWERSHELL_EXTENSION = ".ps1";
+/** `C:tool.exe` / `D:sub\\tool.exe`: a drive letter without a separator after the colon is relative to that drive's current directory. */
+const DRIVE_RELATIVE_PATH = /^[A-Za-z]:(?![\\/])/;
+/** Window for the output pipes of an exited probe to close before its process tree is reaped (matches the discovery probes). */
+const PROBE_PIPE_CLOSE_GRACE_MS = 250;
 const MAX_VERSION_NOTE_CHARS = 300;
 const INCOMPLETE_TRAILING_TOKEN = /\S+$/;
 
@@ -103,15 +109,41 @@ export interface BinaryLookupOptions {
 /**
  * Windows resolves a bare name through PATHEXT, so `tool` may be `tool.exe`, `tool.cmd`, ... The extension list is tried
  * in order and the extensionless name is never a candidate there: it is an npm POSIX shim (a shell script) that
- * Windows cannot start.
+ * Windows cannot start. A `.ps1` is never an implicit candidate either. A name that already ends in a launcher extension
+ * (`tool.exe`) is looked up as written, even when PATHEXT does not list it.
  */
 function candidateNames(name: string, windows: boolean, pathExt: string | undefined): string[] {
   if (!windows) return [name];
   const extensions = (pathExt?.split(";").map((ext) => ext.trim().toLowerCase()).filter(Boolean) ?? []);
-  const known = extensions.length > 0 ? extensions : DEFAULT_PATHEXT;
+  const known = (extensions.length > 0 ? extensions : DEFAULT_PATHEXT).filter((ext) => ext !== POWERSHELL_EXTENSION);
   const lowerName = name.toLowerCase();
-  if (known.some((ext) => lowerName.endsWith(ext))) return [name];
+  if (lowerName.endsWith(POWERSHELL_EXTENSION) || [...known, ...DEFAULT_PATHEXT].some((ext) => lowerName.endsWith(ext))) return [name];
   return known.map((ext) => `${name}${ext}`);
+}
+
+/** Windows lets a PATH entry that contains spaces or semicolons be wrapped in double quotes: `"C:\\Program Files\\Tool"`. */
+function unquotePathEntry(entry: string): string {
+  const trimmed = entry.trim();
+  return trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"') ? trimmed.slice(1, -1) : entry;
+}
+
+/**
+ * Splits a Windows PATH on `;`, except inside a pair of double quotes (`"C:\\a;b\\bin"` is one directory). A quote that is
+ * never closed keeps the rest of the value as one entry, which then fails the pair check and is skipped.
+ */
+export function splitWindowsPath(pathEnv: string): string[] {
+  const entries: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (const char of pathEnv) {
+    if (char === '"') inQuotes = !inQuotes;
+    if (char === ";" && !inQuotes) {
+      entries.push(current);
+      current = "";
+    } else current += char;
+  }
+  entries.push(current);
+  return entries;
 }
 
 /** Lookup options for a harness's configured binary: a relative path is anchored at the user config directory. */
@@ -131,6 +163,8 @@ export function resolveBinary(binary: string, options: BinaryLookupOptions = {})
   const flavor = windows ? win32 : posix;
   const pathDelimiter = flavor.delimiter;
   const pathExt = options.pathExt ?? process.env.PATHEXT;
+  // A drive-relative path depends on the process's per-drive current directory, which must never decide what runs.
+  if (windows && DRIVE_RELATIVE_PATH.test(trimmed)) return undefined;
   const hasDirectory = trimmed.includes("/") || (windows && trimmed.includes("\\"));
   if (flavor.isAbsolute(trimmed) || hasDirectory) {
     let base: string;
@@ -139,7 +173,9 @@ export function resolveBinary(binary: string, options: BinaryLookupOptions = {})
     else return undefined;
     return candidateNames(base, windows, pathExt).find(isExecutableFile);
   }
-  for (const dir of (options.pathEnv ?? process.env.PATH ?? "").split(pathDelimiter)) {
+  const pathValue = options.pathEnv ?? process.env.PATH ?? "";
+  for (const entry of windows ? splitWindowsPath(pathValue) : pathValue.split(pathDelimiter)) {
+    const dir = windows ? unquotePathEntry(entry) : entry;
     if (!dir || !flavor.isAbsolute(dir)) continue;
     for (const name of candidateNames(trimmed, windows, pathExt)) {
       const candidate = join(dir, name);
@@ -155,12 +191,12 @@ export interface LaunchCommand {
   prefixArgs: string[];
 }
 
-const WINDOWS_SCRIPT_LAUNCHER = /\.(?:cmd|bat)$/i;
+const WINDOWS_SCRIPT_LAUNCHER = /\.(?:cmd|bat|ps1)$/i;
 const JAVASCRIPT_ENTRY = /\.(?:c|m)?js$/i;
 
 /**
- * What to spawn for an executable path. A Windows `.cmd`/`.bat` cannot be started without a shell (Node refuses with
- * EINVAL), so an npm launcher shim is replaced by `node <its script>`. A `.cmd`/`.bat` that is not such a shim fails here
+ * What to spawn for an executable path. A Windows `.cmd`/`.bat`/`.ps1` cannot be started without a shell (Node refuses
+ * with EINVAL), so an npm launcher shim is replaced by `node <its script>`. A script that is not such a shim fails here
  * with an actionable error instead.
  */
 export function unwrapLauncher(path: string, platform: NodeJS.Platform = process.platform): LaunchCommand {
@@ -168,7 +204,7 @@ export function unwrapLauncher(path: string, platform: NodeJS.Platform = process
   const script = readNpmShimTarget(path);
   if (script === undefined || !JAVASCRIPT_ENTRY.test(script)) {
     throw adapterError("CLI_NOT_FOUND",
-      `${path} is a .cmd/.bat launcher that is not a recognizable npm JavaScript shim, so it cannot be started without a shell. ` +
+      `${path} is a .cmd/.bat/.ps1 launcher that is not a recognizable npm JavaScript shim, so it cannot be started without a shell. ` +
       "Set the harness binary to the CLI's .exe, or to a wrapper that is an .exe.", false);
   }
   return { command: process.execPath, prefixArgs: [script] };
@@ -232,7 +268,10 @@ function redactAndCap(text: string, limitBytes: number, clipped: boolean): strin
  * Runs a short diagnostic command without a shell. Output is redacted and capped, stdin is closed immediately, and on
  * every way out (clean exit, error, timeout, output overflow) the whole process tree (not only the direct child) is
  * terminated within a bounded wait before the result is returned, so a grandchild that keeps the output pipes open or
- * detaches (setsid) cannot stall the probe or outlive it. A Windows npm `.cmd` shim is started as `node <script>`.
+ * detaches (setsid) cannot stall the probe or outlive it. After a clean exit the output pipes get a short grace to drain
+ * and are then cut, so a grandchild holding them can never turn a success into a timeout. On Windows a probe whose
+ * process already exited is not searched for leftover descendants (no process-table query); a running one is ended with
+ * `taskkill /T /F`. A Windows npm `.cmd` shim is started as `node <script>`.
  */
 export function execProbe(command: string, args: string[], timeoutMs = DEFAULT_PROBE_TIMEOUT_MS): Promise<ProbeOutput> {
   return new Promise((resolvePromise) => {
@@ -242,11 +281,13 @@ export function execProbe(command: string, args: string[], timeoutMs = DEFAULT_P
     let timedOut = false;
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
     let closeWaitTimer: ReturnType<typeof setTimeout> | undefined;
+    let pipeGraceTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = (output: Omit<ProbeOutput, "stdout" | "stderr"> & { stderrFallback?: string }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutTimer);
       clearTimeout(closeWaitTimer);
+      clearTimeout(pipeGraceTimer);
       const { stderrFallback, ...result } = output;
       resolvePromise({
         ...result,
@@ -270,7 +311,7 @@ export function execProbe(command: string, args: string[], timeoutMs = DEFAULT_P
         const { pid } = child;
         const terminated = pid === undefined
           ? Promise.resolve()
-          : terminateProcessTree({ pid, jobId: probeId, graceMs: PROBE_TERMINATE_GRACE_MS }).then(() => undefined, (cause: unknown) => {
+          : terminateProcessTree({ pid, jobId: probeId, graceMs: PROBE_TERMINATE_GRACE_MS, verifyDescendants: false }).then(() => undefined, (cause: unknown) => {
             logger.warn("Could not terminate the process tree of a probe.", {
               command, error: cause instanceof Error ? cause.message : String(cause),
             });
@@ -296,12 +337,24 @@ export function execProbe(command: string, args: string[], timeoutMs = DEFAULT_P
         const stderrFallback = typeof error.code === "string" ? `${error.code}: ${error.message}` : error.message;
         terminateTree(() => finish({ ok: false, exitCode: null, timedOut: false, stderrFallback }));
       });
-      child.once("close", (exitCode, signal) => {
-        if (settled || spawnFailed) return;
+      /** Ends the tree and reports the exit. The first of `exit` (after its pipe grace) and `close` wins. */
+      let exitHandled = false;
+      const reportExit = (exitCode: number | null, signal: NodeJS.Signals | null) => {
+        if (exitHandled || settled || spawnFailed) return;
+        exitHandled = true;
         clearTimeout(timeoutTimer);
+        clearTimeout(pipeGraceTimer);
         // The direct child is gone, but a detached grandchild (setsid) may still hold work: reap it before reporting.
         terminateTree(() => finish({ ok: exitCode === 0 && signal === null && !timedOut, exitCode, timedOut }));
+      };
+      // A grandchild that inherited the pipes keeps `close` from firing after a clean exit: the exit code is final, so the
+      // pipes get a short grace to drain and are then cut instead of letting the timeout turn a success into a failure.
+      child.once("exit", (exitCode, signal) => {
+        if (settled || spawnFailed) return;
+        clearTimeout(timeoutTimer);
+        pipeGraceTimer = setTimeout(() => reportExit(exitCode, signal), PROBE_PIPE_CLOSE_GRACE_MS);
       });
+      child.once("close", reportExit);
       child.stdin.on("error", () => undefined);
       child.stdin.end();
       // A zero or negative timeout means "no timeout".
@@ -410,10 +463,19 @@ export function isExplicitEffort(nativeEffort: string): boolean {
   return nativeEffort !== DEFAULT_NATIVE_EFFORT;
 }
 
-/** Normalizes case/whitespace, maps known synonyms, and passes unknown values through unchanged. */
+const STANDARD_EFFORT_LEVELS: ReadonlySet<string> = new Set([
+  "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", DEFAULT_NATIVE_EFFORT,
+]);
+
+/**
+ * Trims, maps known synonyms (case-insensitively) and lowercases the standard levels. A custom value (a model-specific
+ * effort name or a numeric budget) keeps its original case, since a CLI may treat it as case-sensitive.
+ */
 export function mapEffortWith(synonyms: Record<string, string>, effort: string): string {
-  const normalized = effort.trim().toLowerCase();
-  return Object.hasOwn(synonyms, normalized) ? synonyms[normalized] : normalized;
+  const trimmed = effort.trim();
+  const normalized = trimmed.toLowerCase();
+  if (Object.hasOwn(synonyms, normalized)) return synonyms[normalized];
+  return STANDARD_EFFORT_LEVELS.has(normalized) ? normalized : trimmed;
 }
 
 // ---------------------------------------------------------------------------
@@ -494,11 +556,29 @@ export class BoundedText {
     if (chunk === "" || this.overflowed) return;
     const size = Buffer.byteLength(chunk, "utf8");
     if (this.bytes + size > this.limitBytes) {
-      this.overflowed = true;
+      this.settleAtLimit(chunk);
       return;
     }
     this.value += chunk;
     this.bytes += size;
+  }
+
+  /**
+   * The text reached the cap. A secret may straddle the cut (its start already kept, its end in `chunk`), so the joined text
+   * is redacted before anything is cut, and a trailing run of non-space characters, which could be the start of a secret
+   * whose end is dropped, is removed from a truncated result.
+   */
+  private settleAtLimit(chunk: string): void {
+    const joined = redactSecrets(this.value + chunk);
+    const cut = truncateUtf8(joined, this.limitBytes);
+    if (!cut.truncated) {
+      this.value = joined;
+      this.bytes = Buffer.byteLength(joined, "utf8");
+      return;
+    }
+    this.overflowed = true;
+    this.value = cut.text.replace(/\S{1,512}$/, "");
+    this.bytes = Buffer.byteLength(this.value, "utf8");
   }
 
   /** Replaces everything kept so far (a snapshot supersedes the deltas that led to it). */
@@ -570,6 +650,20 @@ export async function verifyBinaryIdentity(
 // Error classification
 // ---------------------------------------------------------------------------
 
+/**
+ * Prefix for numeric status codes: JSON fields (`"status":429`, `"code": 503`, `"status_code": 429`) and HTTP
+ * protocol strings (`HTTP/2 503`, `HTTP 529`). A bare file position such as `src/a.ts:429:` has no such prefix.
+ */
+const STATUS_CONTEXT = String.raw`\b(?:http(?:\/\d(?:\.\d)?)?|status(?:_code)?|code|error)["']?[\s:=]+`;
+
+/** HTTP 401 and 403 with status context (`HTTP/2 401`, `API Error: 401`, `"status": 401`, `"code": 403`) or their reason phrase. */
+const HTTP_401_PATTERN = new RegExp(`${STATUS_CONTEXT}401\\b|\\b401\\s+unauthori[sz]ed`, "i");
+const HTTP_403_PATTERN = new RegExp(`${STATUS_CONTEXT}403\\b|\\b403\\s+forbidden`, "i");
+
+/** The bare word is weak evidence: "403 Unauthorized: model x not found" is a model refusal, not a missing login. */
+const BARE_UNAUTHORIZED_PATTERN = /\bunauthori[sz]ed\b/i;
+
+/** Signals that mean "not authenticated" on their own. A bare HTTP 403 is not one: it may be a model permission error. */
 const AUTH_PATTERNS = [
   /not\s+logged\s+in/i,
   /please\s+(?:run\s+)?(?:\/)?login/i,
@@ -580,13 +674,20 @@ const AUTH_PATTERNS = [
   /invalid\s+api[\s_-]?key/i,
   /missing\s+api[\s_-]?key/i,
   /no\s+api[\s_-]?key/i,
-  /\bunauthori[sz]ed\b/i,
-  /\b(?:status|http|code)[\s:=]*40[13]\b|\b40[13]\s+(?:unauthori[sz]ed|forbidden)/i,
+  BARE_UNAUTHORIZED_PATTERN,
+  HTTP_401_PATTERN,
+  /\b(?:status|http|code)[\s:=]*401\b/i,
   /\bUNAUTHENTICATED\b/,
   /authentication[_\s](?:failed|error|required)/i,
   /(?:oauth|access)\s+token\s+(?:has\s+)?(?:expired|revoked|invalid)/i,
   /credentials?\s+(?:are\s+|is\s+)?(?:missing|invalid|expired|not\s+found)/i,
   /no\s+credentials/i,
+  /failed\s+to\s+authenticate/i,
+  /\b(?:oauth|auth)\s+session\s+(?:has\s+)?(?:expired|revoked|invalid)/i,
+  /\brefresh\s+token\s+(?:has\s+)?(?:expired|revoked|invalid)/i,
+  /\b(?:invalid_grant|token_expired)\b/i,
+  /please\s+re-?authenticate/i,
+  /\bapi\s+key\s+(?:is\s+)?not\s+valid\b|\bincorrect\s+api\s+key\s+provided\b/i,
 ];
 
 const MODEL_PATTERNS = [
@@ -598,6 +699,7 @@ const MODEL_PATTERNS = [
   /model_not_found/i,
   /issue\s+with\s+the\s+selected\s+model/i,
   /no\s+such\s+model/i,
+  /model_not_supported/i,
 ];
 
 const RETRYABLE_PATTERNS = [
@@ -610,30 +712,41 @@ const RETRYABLE_PATTERNS = [
   /temporar(?:y|ily)\s+unavailable/i,
 ];
 
+/** Authentication failure other than a bare HTTP 403 (which may be a model permission error). */
+function looksLikeStrongAuthFailure(text: string): boolean {
+  // A 403 that names a model is judged as a model refusal unless something stronger than the bare word says "not logged in".
+  const modelRefusal = looksLikeModelForbidden(text);
+  return AUTH_PATTERNS.some((pattern) => !(modelRefusal && pattern === BARE_UNAUTHORIZED_PATTERN) && pattern.test(text));
+}
+
+function looksLikeHttp403(text: string): boolean {
+  return HTTP_403_PATTERN.test(text) || /\b(?:status|http|code)[\s:=]*403\b/i.test(text);
+}
+
 export function looksLikeAuthFailure(text: string): boolean {
-  return AUTH_PATTERNS.some((pattern) => pattern.test(text));
+  return looksLikeStrongAuthFailure(text) || looksLikeHttp403(text);
+}
+
+/** HTTP 403 next to a model error ("HTTP 403 model x not found"): the model is refused, the login is fine. */
+function looksLikeModelForbidden(text: string): boolean {
+  return (looksLikeHttp403(text) || /\b403\b/.test(text)) && looksLikeModelUnsupported(text);
 }
 
 export function looksLikeModelUnsupported(text: string): boolean {
   return MODEL_PATTERNS.some((pattern) => pattern.test(text));
 }
 
-/**
- * Prefix for numeric status codes: JSON fields (`"status":429`, `"code": 503`, `"status_code": 429`) and HTTP
- * protocol strings (`HTTP/2 503`, `HTTP 529`). A bare file position such as `src/a.ts:429:` has no such prefix.
- */
-const STATUS_CONTEXT = String.raw`\b(?:http(?:\/\d(?:\.\d)?)?|status(?:_code)?|code|error)["']?[\s:=]+`;
 const STATUS_429 = `${STATUS_CONTEXT}429\\b`;
-const STATUS_OVERLOADED = `${STATUS_CONTEXT}(?:502|503|529)\\b`;
+const STATUS_OVERLOADED = `${STATUS_CONTEXT}(?:500|502|503|504|529)\\b`;
 /** Transient throttle wording, next to RESOURCE_EXHAUSTED it marks a rate limit rather than a spent quota. */
 const TRANSIENT_RATE_TERMS = new RegExp(
   `${STATUS_429}|(?:requests|tokens)\\s+per\\s+minute|rate[\\s_-]?limit|too\\s+many\\s+requests|throttl`, "i");
 /** Wording that means the account's allowance is spent, even when the provider also answers HTTP 429. */
-const HARD_QUOTA_TERMS = /daily\s+(?:limit|quota)|insufficient[\s_-]quota|credit|billing|balance|plan\s+limit|out\s+of\s+credits|spend\s+limit|you['\u2019]?ve\s+hit\s+your\s+(?:usage\s+)?limit/i;
+const HARD_QUOTA_TERMS = /daily\s+(?:limit|quota)|insufficient[\s_-]quota|credit|billing|balance|plan\s+limit|out\s+of\s+credits|spend\s+limit|you['\u2019]?ve\s+hit\s+your\s+(?:usage\s+)?limit|you(?:['\u2019]?ve|\s+have)?\s+exceeded\s+your\s+(?:current\s+)?quota/i;
 const RATE_LIMITED_PATTERN = new RegExp(
   `${STATUS_429}|\\b429\\s+too\\s+many|too\\s+many\\s+requests|rate[\\s_-]?limit|(?:requests|tokens)\\s+per\\s+minute|\\bthrottl(?:ed|ing)\\b`, "i");
 const PROVIDER_OVERLOADED_PATTERN = new RegExp(
-  `${STATUS_OVERLOADED}|\\b(?:502\\s+bad\\s+gateway|503\\s+service\\s+unavailable|529\\s+overloaded|503\\s+overloaded)\\b|overloaded_error|\\bserver\\s+is\\s+overloaded\\b|\\boverloaded\\b|\\bat\\s+capacity\\b|\\bhigh\\s+demand\\b|\\bservice\\s+unavailable\\b|\\bbad\\s+gateway\\b|\\btemporar(?:y|ily)\\s+unavailable\\b|\\bserver\\s+is\\s+busy\\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket\\s+hang\\s+up`, "i");
+  `${STATUS_OVERLOADED}|\\b(?:500\\s+internal\\s+server\\s+error|502\\s+bad\\s+gateway|503\\s+service\\s+unavailable|504\\s+gateway\\s+time-?out|529\\s+overloaded|503\\s+overloaded)\\b|overloaded_error|\\bserver\\s+is\\s+overloaded\\b|\\boverloaded\\b|\\bat\\s+capacity\\b|\\bhigh\\s+demand\\b|\\bservice\\s+unavailable\\b|\\bbad\\s+gateway\\b|\\btemporar(?:y|ily)\\s+unavailable\\b|\\bserver\\s+is\\s+busy\\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket\\s+hang\\s+up`, "i");
 
 function hasHardQuotaWording(text: string): boolean {
   if (HARD_QUOTA_TERMS.test(text)) return true;
@@ -650,9 +763,11 @@ function isTransientThrottle(text: string): boolean {
   return TRANSIENT_RATE_TERMS.test(text) && !hasHardQuotaWording(text);
 }
 
+const STATUS_402_PATTERN = new RegExp(`${STATUS_CONTEXT}402\\b`, "i");
+
 export function looksLikeQuotaExceeded(text: string): boolean {
   if (isResourceExhaustedThrottle(text) || isTransientThrottle(text)) return false;
-  return /quota[ _-]exceeded|insufficient[ _-]quota|credit balance is too low|insufficient (?:credits?|balance)|balance is not enough|out of credits/i.test(text) ||
+  return STATUS_402_PATTERN.test(text) || /quota[ _-]exceeded|you(?:['\u2019]?ve|\s+have)?\s+exceeded\s+your\s+(?:current\s+)?quota|insufficient[ _-]quota|credit balance is too low|insufficient (?:credits?|balance)|balance is not enough|out of credits/i.test(text) ||
     /billing[ _-](?:hard[ _-])?limit|check your plan and billing|spend limit|payment required|\b(?:http|status|code)[\s:=]*402\b/i.test(text) ||
     /resource_exhausted|usage[ _-]limit|hit your (?:usage )?limit|plan limit reached|limit resets/i.test(text);
 }
@@ -664,12 +779,17 @@ export function looksLikeRateLimited(text: string): boolean {
 }
 
 /** Requires HTTP/status/error context for 5xx codes so bare numbers never match. */
+/** Structured gRPC-style statuses are upper case on purpose: a lower-case "unavailable" is ordinary prose. */
+const STRUCTURED_UNAVAILABLE_PATTERN = /\bDEADLINE_EXCEEDED\b|\b(?:status|code)["']?[\s:=]+["']?UNAVAILABLE\b/;
+
 export function looksLikeProviderOverloaded(text: string): boolean {
-  return PROVIDER_OVERLOADED_PATTERN.test(text);
+  return PROVIDER_OVERLOADED_PATTERN.test(text) || STRUCTURED_UNAVAILABLE_PATTERN.test(text);
 }
 
+const STATUS_413_PATTERN = new RegExp(`${STATUS_CONTEXT}413\\b`, "i");
+
 export function looksLikePromptTooLarge(text: string): boolean {
-  return /prompt is too long|context[ _-]length[ _-]exceeded|maximum context length|exceeds the (?:model'?s? )?context window|input is too long|request too large|too many tokens|token limit exceeded|exceeds the maximum number of (?:input )?tokens|input token count[^\n]{0,60}exceeds/i.test(text);
+  return STATUS_413_PATTERN.test(text) || /payload too large|context_window_exceeded/i.test(text) || /prompt is too long|context[ _-]length[ _-]exceeded|maximum context length|exceeds the (?:model'?s? )?context window|input is too long|request too large|too many tokens|token limit exceeded|exceeds the maximum number of (?:input )?tokens|input token count[^\n]{0,60}exceeds/i.test(text);
 }
 
 /** A context overflow wins over the generic status it travels in (RESOURCE_EXHAUSTED), but not over a real throttle. */
@@ -677,9 +797,46 @@ function looksLikeContextLimit(text: string): boolean {
   return looksLikePromptTooLarge(text) && !TRANSIENT_RATE_TERMS.test(text);
 }
 
+/** Signatures of an OS sandbox that could not be set up (Windows restricted token, ACL setup, logon type); never provider prose. */
+const SANDBOX_FAILURE_WORDING = String.raw`(?:fail(?:ed|ure|s)?|error|denied|unavailable|cannot|could\s+not|unable|refused|abort(?:ed)?)`;
+const SANDBOX_SETUP_PATTERNS = [
+  // The sandbox's name alone is not a failure: it also appears in banners, docs and ordinary answers.
+  new RegExp(String.raw`windows\s+sandbox[^\n]{0,80}${SANDBOX_FAILURE_WORDING}`, "i"),
+  new RegExp(String.raw`${SANDBOX_FAILURE_WORDING}[^\n]{0,80}windows\s+sandbox`, "i"),
+  /codex-windows-sandbox[^\n]{0,80}(?:fail(?:ed|ure)?|error|denied|exit|panic)/i,
+  /setup\s+refresh\s+(?:had\s+errors|failed)/i,
+  /deny_read_acl/i,
+  /os\s+error\s+(?:1314|1385)\b/i,
+  /restricted\s+token[^\n]{0,60}(?:failed|error|denied)/i,
+  /sandbox\s+(?:initialization|setup|startup)\s+failed/i,
+];
+/** A bare "access denied" is a file permission error unless the text also names the sandbox machinery. */
+const ACCESS_DENIED_PATTERN = /os\s+error\s+5\b|access\s+is\s+denied/i;
+const SANDBOX_CONTEXT_PATTERN = /sandbox|setup|restricted[\s-]token|workspace-write|read-only|codex/i;
+
+/** True when the diagnostics show the CLI's OS sandbox could not start, which no retry on the same machine fixes. */
+export function looksLikeSandboxUnavailable(text: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (SANDBOX_SETUP_PATTERNS.some((pattern) => pattern.test(text))) return true;
+  if (platform !== "win32" && !/sandbox/i.test(text)) return false;
+  return ACCESS_DENIED_PATTERN.test(text) && SANDBOX_CONTEXT_PATTERN.test(text);
+}
+
+/** Non-secret next steps attached to a SANDBOX_UNAVAILABLE failure. */
+const SANDBOX_UNAVAILABLE_HINTS: readonly string[] = [
+  "Run the job from a local path that is not under OneDrive and not a UNC (\\\\server\\share) path, and keep the path shorter than 240 characters.",
+  "Make sure TEMP and TMP point to a folder under %USERPROFILE%.",
+  "Verify that the account may create restricted tokens and set file ACLs (Windows sandbox permissions), or that the CLI's sandbox is installed.",
+  "Reroute the subtask to another enabled harness; this harness is put on cooldown.",
+];
+
 const FAILURE_CLASSES: ReadonlyArray<{
-  matches: (text: string) => boolean; code: ErrorCode; scope: FailureScope; retryable: boolean;
+  matches: (text: string, platform?: NodeJS.Platform) => boolean; code: ErrorCode; scope: FailureScope; retryable: boolean;
 }> = [
+  { matches: looksLikeStrongAuthFailure, code: "AUTH_REQUIRED", scope: "harness", retryable: false },
+  // A 403 that names a model is a model permission error, not a login problem.
+  { matches: looksLikeModelForbidden, code: "MODEL_UNSUPPORTED", scope: "model", retryable: false },
+  // Before the bare-403 login check and the generic exit classes, so a sandbox "Access is denied" is never misread.
+  { matches: looksLikeSandboxUnavailable, code: "SANDBOX_UNAVAILABLE", scope: "harness", retryable: false },
   { matches: looksLikeAuthFailure, code: "AUTH_REQUIRED", scope: "harness", retryable: false },
   { matches: looksLikeContextLimit, code: "PROMPT_TOO_LARGE", scope: "model", retryable: false },
   { matches: looksLikeQuotaExceeded, code: "QUOTA_EXCEEDED", scope: "harness", retryable: false },
@@ -697,15 +854,17 @@ export function adapterError(
   code: ErrorCode,
   message: string,
   retryable: boolean,
-  extra: { details?: Record<string, unknown>; stderrTail?: string } = {},
+  extra: { details?: Record<string, unknown>; stderrTail?: string; extraSecrets?: readonly string[] } = {},
 ): StructuredError {
+  const secrets = extra.extraSecrets ? [...extra.extraSecrets] : undefined;
+  // Redact first, truncate second: a secret straddling the cut would otherwise survive as an unrecognizable prefix.
   const error: StructuredError = {
     code,
-    message: tail(redactSecrets(message.trim()), MESSAGE_LIMIT_CHARS),
+    message: tail(redactSecrets(message.trim(), secrets), MESSAGE_LIMIT_CHARS),
     retryable,
   };
   if (extra.details) error.details = extra.details;
-  if (extra.stderrTail?.trim()) error.stderr_tail = redactSecrets(extra.stderrTail);
+  if (extra.stderrTail?.trim()) error.stderr_tail = redactSecrets(extra.stderrTail, secrets);
   return error;
 }
 
@@ -717,22 +876,28 @@ export function classifiedFailure(
   input: FinishParseInput,
   reportedMessage: string | undefined,
   fallbackCode: ErrorCode,
-  extra: { details?: Record<string, unknown>; usage?: UsageStats; warnings?: string[]; summary?: string } = {},
+  extra: { details?: Record<string, unknown>; usage?: UsageStats; warnings?: string[]; summary?: string; platform?: NodeJS.Platform } = {},
 ): ParsedAdapterResult {
+  const secrets = input.extraSecrets ? [...input.extraSecrets] : undefined;
+  const redact = (text: string): string => redactSecrets(text, secrets);
   const reported = reportedMessage?.trim() ?? "";
   const stderr = input.stderrTail.trim();
   const evidence = reported.includes(stderr) ? reported : stderr.includes(reported) ? stderr : reported + "\n" + stderr;
-  const match = FAILURE_CLASSES.find(({ matches }) => matches(evidence));
+  const match = FAILURE_CLASSES.find(({ matches }) => matches(evidence, extra.platform));
   const exitPart = input.signal ? `signal ${input.signal}` : `exit code ${input.exitCode ?? "n/a"}`;
   const code = match?.code ?? fallbackCode;
-  const description = code === "AUTH_REQUIRED" ? "is not authenticated" : code === "MODEL_UNSUPPORTED" ? "rejected the model" : "failed";
-  const error = adapterError(code, `${label} ${description} (${exitPart}): ${reported || tail(stderr, 500) || "no error output"}`,
-    match?.retryable ?? looksRetryable(evidence), { details: extra.details, stderrTail: input.stderrTail });
+  const description = code === "AUTH_REQUIRED" ? "is not authenticated"
+    : code === "MODEL_UNSUPPORTED" ? "rejected the model"
+      : code === "SANDBOX_UNAVAILABLE" ? "could not start its OS sandbox"
+        : "failed";
+  const details = code === "SANDBOX_UNAVAILABLE" ? { ...extra.details, hints: [...SANDBOX_UNAVAILABLE_HINTS] } : extra.details;
+  const error = adapterError(code, `${label} ${description} (${exitPart}): ${reported || tail(redact(stderr), 500) || "no error output"}`,
+    match?.retryable ?? looksRetryable(evidence), { details, stderrTail: input.stderrTail, extraSecrets: input.extraSecrets });
   error.failure_scope = match?.scope ?? (fallbackCode === "AUTH_REQUIRED" ? "harness" : "job");
-  if (evidence) error.raw_error = redactSecrets(evidence).slice(0, MESSAGE_LIMIT_CHARS);
+  if (evidence) error.raw_error = redact(evidence).slice(0, MESSAGE_LIMIT_CHARS);
   return {
     ok: false,
-    summary: redactSecrets(extra.summary ?? ""),
+    summary: redact(extra.summary ?? ""),
     error,
     ...(extra.usage ? { usage: extra.usage } : {}),
     ...(extra.warnings?.length ? { warnings: extra.warnings } : {}),
@@ -753,6 +918,25 @@ export function streamWarnings(input: FinishParseInput): string[] {
   return warnings;
 }
 
+const MAX_CLI_DIAGNOSTIC_CHARS = 2048;
+const MAX_UNPREFIXED_DIAGNOSTIC_CHARS = 256;
+const MAX_UNPREFIXED_DIAGNOSTIC_LINES = 2;
+/** An explicit CLI error label at the start of the output (`Error:`, `API Error:`, ...). */
+const CLI_ERROR_PREFIX = /^(?:error|api\s+error|failed\s+to\s+authenticate|fatal|unauthori[sz]ed)\s*:/i;
+/** The few login prompts a CLI prints, unlabelled, when it is not signed in; nothing broader may turn an answer into an error. */
+const CLI_LOGIN_PROMPT = /^(?:you\s+are\s+)?not\s+logged\s+in\b|^login\s+required\b|^please\s+(?:sign\s+in|run\s+\/?login|re-?authenticate)\b|^oauth\s+session\s+(?:has\s+)?expired\b|^invalid\s+api[\s_-]?key\b/i;
+
+/**
+ * True when exit-0 stdout reads like a CLI error message rather than an answer: short, and either labelled with an error
+ * prefix or a one- or two-line login prompt. Prose that merely mentions "rate limit" or "429" never qualifies.
+ */
+function looksLikeCliDiagnostic(text: string): boolean {
+  if (text === "" || text.length > MAX_CLI_DIAGNOSTIC_CHARS) return false;
+  if (CLI_ERROR_PREFIX.test(text)) return true;
+  if (text.length > MAX_UNPREFIXED_DIAGNOSTIC_CHARS || text.includes("```") || /\n\s*\n/.test(text)) return false;
+  return text.split("\n").length <= MAX_UNPREFIXED_DIAGNOSTIC_LINES && CLI_LOGIN_PROMPT.test(text);
+}
+
 /**
  * Exit code 0 but no structured result: degrade to the raw non-JSON text when
  * there is any, unless stderr reports a recognized provider failure.
@@ -762,12 +946,19 @@ export function degradedOrParseError(
   input: FinishParseInput,
   rawText: string,
   reason: string,
+  options: { allowStdoutErrorClassification?: boolean } = {},
 ): ParsedAdapterResult {
+  const { allowStdoutErrorClassification = true } = options;
   const warnings = streamWarnings(input);
   if (FAILURE_CLASSES.some(({ matches }) => matches(input.stderrTail))) {
     return classifiedFailure(label, input, undefined, "PARSE_ERROR", { warnings });
   }
   const text = rawText.trim();
+  // A CLI that exits 0 after printing a short diagnostic ("Error: login required") failed; it did not answer.
+  // Not when `rawText` is assistant prose from a typed stream: an answer about rate limits is still an answer.
+  if (allowStdoutErrorClassification && looksLikeCliDiagnostic(text) && FAILURE_CLASSES.some(({ matches }) => matches(text))) {
+    return classifiedFailure(label, input, text, "PARSE_ERROR", { warnings });
+  }
   if (text) {
     return {
       ok: true,

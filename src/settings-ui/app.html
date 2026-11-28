@@ -2410,9 +2410,14 @@ function toggle(checked, onChange, { fk, label, text, disabled } = {}) {
 }
 
 /** Pending (typed but not yet added) text of the open drawer's add-inputs, kept across re-renders and flushed on save. */
-function setPending(drawer, fk, text, commit) {
+function isPendingText(entry) {
+  return entry.preserveWhitespace ? entry.text !== "" : entry.text.trim() !== "";
+}
+
+function setPending(drawer, fk, text, commit, { preserveWhitespace = false } = {}) {
   if (!drawer.pending) drawer.pending = {};
-  if (text.trim()) drawer.pending[fk] = { text, commit }; else delete drawer.pending[fk];
+  const entry = { text, commit, preserveWhitespace };
+  if (isPendingText(entry)) drawer.pending[fk] = entry; else delete drawer.pending[fk];
   if (state.drawer === drawer) syncDirtyIndicator();
 }
 
@@ -2420,16 +2425,17 @@ function clearPending(fk) {
   if (state.drawer && state.drawer.pending) delete state.drawer.pending[fk];
 }
 
-function trackPending(fk, input, commit) {
+/** `preserveWhitespace`: the text is a literal token (a CLI argument), so a whitespace-only value is real and must be saved. */
+function trackPending(fk, input, commit, options = {}) {
   const drawer = state.drawer;
   if (!drawer) return;
   const kept = drawer.pending && drawer.pending[fk];
   if (kept) { input.value = kept.text; kept.commit = commit; }
-  input.addEventListener("input", () => setPending(drawer, fk, input.value, commit));
+  input.addEventListener("input", () => setPending(drawer, fk, input.value, commit, options));
 }
 
 function hasPendingText(drawer) {
-  return Object.values(drawer.pending || {}).some((entry) => entry.text.trim() !== "");
+  return Object.values(drawer.pending || {}).some(isPendingText);
 }
 
 /** Adds every typed-but-unsubmitted item before a save; stops (and says why) when one cannot be added. */
@@ -2439,7 +2445,7 @@ function commitPendingInputs() {
   for (const fk of Object.keys(drawer.pending)) {
     const entry = drawer.pending[fk];
     if (!entry) continue;
-    if (!entry.text.trim()) { delete drawer.pending[fk]; continue; }
+    if (!isPendingText(entry)) { delete drawer.pending[fk]; continue; }
     if (!entry.commit()) { focusByKey(fk); return false; }
   }
   return true;
@@ -2534,21 +2540,22 @@ function argvEditor(items, onChange, { fk, placeholder }) {
       iconButton("chevron-down", t("Move down"), { disabled: index === working.length - 1, onclick: () => move(index, 1) }),
       iconButton("close", t("Remove item"), { cls: "icon-btn danger", onclick: () => onChange(working.filter((_, i) => i !== index), true) }));
   });
+  // A token is kept exactly as typed: leading and trailing spaces can be part of a literal argument.
   const addPending = () => {
-    const text = adder.value.trim();
-    if (!text) return true;
+    const text = adder.value;
+    if (text === "") return true;
     clearPending(fk);
     onChange([...working, text], true);
     return true;
   };
   const adder = h("input", { class: "input mono", type: "text", "data-fk": fk, id: fk, placeholder, autocomplete: "off", spellcheck: "false",
     onkeydown: (event) => {
-      if (event.key === "Enter" && event.target.value.trim()) {
+      if (event.key === "Enter" && event.target.value !== "") {
         event.preventDefault();
         addPending();
       }
     } });
-  trackPending(fk, adder, addPending);
+  trackPending(fk, adder, addPending, { preserveWhitespace: true });
   return h("div", { class: "list-editor" }, rows,
     h("div", { class: "input-row" }, adder, button(t("Add"), { cls: "btn add-btn", iconName: "plus", onclick: addPending })));
 }
@@ -3872,8 +3879,8 @@ function harnessDraftProblem(draft) {
 function cleanHarnessDraft(draft) {
   const out = dropBlankOptionals(draft, ["binary", "display_name", "profile", "default_upstream_provider", "write_permission_mode", "model_discovery"]);
   if (out.max_concurrency === "" || out.max_concurrency === null) delete out.max_concurrency;
-  // One token per row: blank rows are dropped, the others are kept exactly as typed.
-  if (out.extra_args) out.extra_args = out.extra_args.filter((token) => token.trim() !== "");
+  // One token per row: only empty rows are dropped; whitespace-only or padded tokens are literal arguments and stay as typed.
+  if (out.extra_args) out.extra_args = out.extra_args.filter((token) => token !== "");
   return out;
 }
 

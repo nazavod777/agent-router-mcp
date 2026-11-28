@@ -91,20 +91,20 @@ Config file that `agrmcp mcp` edits for each CLI (override variables in parenthe
 | CLI | Config file |
 |---|---|
 | `claude` | `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json`), user scope |
-| `codex` | `~/.codex/config.toml` (`$CODEX_HOME`) |
+| `codex` | `~/.codex/config.toml` (`$CODEX_HOME`); MCP registration edits the top-level `mcp_servers` table only; a top-level `profile = "<name>"` is honored by CLI limit discovery (`src/config/cli-limits.ts`), not by MCP registration |
 | `dsh` | `~/.dsh/cordis.patch.yml` (`$DSH_HOME`), entry id `mcp-orchestrator` |
 | `pi` | `~/.pi/agent/mcp.json` (`$PI_CODING_AGENT_DIR`) |
-| `antigravity` | `~/.gemini/config/mcp_config.json`; the legacy `~/.gemini/antigravity/mcp_config.json` is used only while the new file does not exist |
-| `opencode` | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`$XDG_CONFIG_HOME`, `$OPENCODE_CONFIG_DIR`, `$OPENCODE_CONFIG`) |
+| `antigravity` | `~/.gemini/config/mcp_config.json` (`$GEMINI_HOME` replaces `~/.gemini`); the legacy `~/.gemini/antigravity/mcp_config.json` is used only while the new file does not exist. T3 Code profiles are covered too (`antigravity:t3:<id>`, see "Isolated / ACP host config directories") |
+| `opencode` | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`$XDG_CONFIG_HOME`, `$OPENCODE_CONFIG_DIR`; an explicit `$OPENCODE_CONFIG` file wins) |
 | `gemini` | `~/.gemini/settings.json` (`$GEMINI_CLI_HOME/.gemini`) |
 | `cursor` | `~/.cursor/mcp.json` |
 | `grok` | `~/.grok/config.toml` (`$GROK_HOME`) |
 | `kiro` | `~/.kiro/settings/mcp.json` |
-| `fx` | `~/.fx/mcp.json` |
+| `fx` | `~/.fx/mcp.json` (`$FX_HOME`) |
 | `muse` | `~/.config/muse/settings.json` (`$XDG_CONFIG_HOME`) |
 | `copilot` | `~/.copilot/mcp-config.json` (`$COPILOT_HOME`) |
 | `droid` | `~/.factory/mcp.json` |
-| `qwen` | `~/.qwen/settings.json` |
+| `qwen` | `~/.qwen/settings.json` (`$QWEN_HOME`) |
 | `kimi` | `~/.kimi-code/mcp.json` (`$KIMI_CODE_HOME`); the legacy `~/.kimi/mcp.json` is used only while `~/.kimi-code` does not exist |
 | `vibe` | `~/.vibe/config.toml` (`$VIBE_HOME`) |
 
@@ -149,7 +149,7 @@ Use `--scope user`; without it Gemini CLI registers the server only for the curr
 agy mcp add orchestrator -- "$(command -v node)" "<clone>/dist/cli/main.js" mcp
 ```
 
-Antigravity stores user-level MCP servers in `~/.gemini/config/mcp_config.json` (legacy location: `~/.gemini/antigravity/mcp_config.json`). `agrmcp mcp install --target antigravity` edits whichever file applies.
+Antigravity stores user-level MCP servers in `~/.gemini/config/mcp_config.json` (legacy location: `~/.gemini/antigravity/mcp_config.json`). `$GEMINI_HOME` replaces `~/.gemini` for Antigravity. `agrmcp mcp install --target antigravity` edits whichever file applies and also every discovered T3 Code profile (see "Isolated / ACP host config directories"); `--target antigravity:primary` repairs only the primary location.
 
 ### OpenCode
 
@@ -223,8 +223,10 @@ Some hosts (T3 Code, Zed ACP agents, IDE extensions) launch the CLI with a **pri
 | Codex CLI | `CODEX_HOME` env var | `~/.codex` |
 | Pi | `PI_CODING_AGENT_DIR` env var | `~/.pi/agent` |
 | Gemini CLI | `GEMINI_CLI_HOME` env var (Gemini CLI uses `$GEMINI_CLI_HOME/.gemini`) | `~/.gemini` |
+| Antigravity | `GEMINI_HOME` env var, or a T3 Code profile (below) | `~/.gemini` |
+| Other CLIs | `FX_HOME` (fx), `QWEN_HOME` (qwen), `KIMI_CODE_HOME` (kimi), plus `DSH_HOME`, `GROK_HOME`, `COPILOT_HOME`, `VIBE_HOME` | `~/.fx`, `~/.qwen`, `~/.kimi-code`, ... |
 
-Some hosts (for example Antigravity or other ACP hosts) manage their own isolated config directory; that location is host-specific and is not a standard Gemini CLI flag — check the host's settings or docs.
+**T3 Code and Antigravity:** T3 Code keeps one isolated Antigravity profile per provider instance at `<T3_HOME or ~/.t3>/userdata/providers/antigravity/<id>/config/mcp_config.json`. `agrmcp setup`, `agrmcp mcp install | status | uninstall` discover these automatically and list them as `antigravity:t3:<id>` (ids are shown by `agrmcp mcp status`). A profile is skipped when `GEMINI_HOME` already points into it (no duplicate edits), and a profile whose path is a symlink leaving the profile tree is refused (containment guard). Use `--target antigravity:t3:<id>` for one profile, `--target antigravity:primary` for the primary location only (so `--force` can never touch a profile). Other ACP hosts manage their own directory; that location is host-specific, so check the host's settings or docs.
 
 **Diagnose:**
 
@@ -443,7 +445,7 @@ All `[defaults]` keys are listed in [§6](#6-schema--enum-cheat-sheet).
 
 - `write_permission_mode` must be one of the driver's modes (§6) for drivers that declare modes; the schema rejects anything else. Accepted is not applied: `codex` (and every driver without a mode list) accepts the field for compatibility but ignores it, and the Settings UI shows a saved value as ignored with a Clear button. Only `claude`, `antigravity`, `gemini`, `droid`, and `qwen` pass it to the CLI.
 - `inherit_mcp` has 3 states: leave it unset to follow `defaults.inherit_mcp`, or set `true` / `false`. Built-in harnesses do not pin it. To clear an inherited value on an entity, use `agrmcp config set harnesses.<id>._unset '["inherit_mcp"]'` (any optional field listed in §6 can be cleared this way); the field keeps `field_provenance = "overridden"`, so reset stays available. Never enable `inherit_mcp` just to fix a failing run.
-- MCP isolation depends on the driver (`mcpIsolation` in `src/drivers.ts`, the last column of the README harness table): `flag` and `config` drivers switch user MCP servers off for a run, `none` drivers have no such switch. `cursor` and `copilot` are `none`: `cursor` only warns that servers may stay loaded; `copilot` adds `--disable-builtin-mcps` and `--deny-tool <server>` for every server in `$COPILOT_HOME/mcp-config.json`, and servers added later may remain callable. A readonly Copilot run grants no tool at all (non-interactive mode refuses whatever needs approval) and also passes `--deny-tool write --deny-tool shell`. When `inherit_mcp` is false (or the Copilot run is readonly) and the MCP config of `copilot` (`mcp-config.json`) or `codex` (`config.toml`) exists but cannot be named safely (oversized, not valid JSON/TOML, more than 64 servers, or a server name that is empty, longer than 128 characters or, for Copilot, starts with `-`), the run is refused with `SANDBOX_POLICY_VIOLATION` instead of starting with servers still enabled; a missing file is fine. Repair or remove the file; do not enable `inherit_mcp` to get around it.
+- MCP isolation depends on the driver (`mcpIsolation` in `src/drivers.ts`, the last column of the README harness table): `flag` and `config` drivers switch user MCP servers off for a run, `none` drivers have no such switch. `cursor` and `copilot` are `none`: `cursor` only warns that servers may stay loaded; `copilot` adds `--disable-builtin-mcps` and `--deny-tool <server>` for every server in `$COPILOT_HOME/mcp-config.json`, and servers added later may remain callable. A readonly Copilot run grants no tool at all (non-interactive mode refuses whatever needs approval) and also passes `--deny-tool write --deny-tool shell`. `opencode` and `dsh` are fail-closed too: OpenCode MCP servers are read from the V1/V2 JSONC configs (global, `$OPENCODE_CONFIG`, and project `.opencode/`), and DSH from `cordis.patch.yml` plus the active profile patches, including any `@deepseek-ai/dsh-mcp-client` plugin; each named server is switched off for the run. When `inherit_mcp` is false (or the Copilot run is readonly) and the MCP config of `copilot` (`mcp-config.json`), `codex` (`config.toml`), `opencode`, or `dsh` exists but cannot be named safely (oversized, not valid JSON/TOML, more than 64 servers, or a server name that is empty, longer than 128 characters or, for Copilot, starts with `-`), the run is refused with `SANDBOX_POLICY_VIOLATION` instead of starting with servers still enabled; a missing file is fine. Repair or remove the file; do not enable `inherit_mcp` to get around it.
 - `model_discovery`: `manual`, `native`, or `wrapper` (P10). A custom wrapper or any path-based binary defaults to `manual`, so `agrmcp models discover` never runs it until you opt in.
 - `profile` is read only by `codex` and `dsh`; `default_upstream_provider` only by `dsh` and `pi` (Pi also uses it for vendor inference); `cli_provider` (model) only by `dsh`, `pi`, `opencode`, and `fx`. An `opencode` model needs a provider: `cli_provider`, or `cli_model = "provider/model"`. `agrmcp doctor` flags violations as `config_diagnostics`.
 - `vendor_family` (model) is optional: without it the planner infers the vendor from the model, harness driver, and upstream provider (aggregators such as Pi included); an unknown vendor never counts as "cross-vendor" for review.
@@ -615,6 +617,8 @@ For MCP-only hosts, use `orch_status({ plan_id, until: "any_terminal", wait_ms: 
 | Agent follows old orchestration rules | Stale installed skill copy | `agrmcp setup --target <cli>` (or `agrmcp skill install`; plus `--dir` for isolated hosts) |
 | Skill is installed but the `orch_*` tools are missing (or `agrmcp doctor` warns "MCP registration is missing / stale / disabled") | The skill and the MCP entry drifted apart, or the clone moved so the entry points at an old build | `agrmcp mcp status`, then run the `fix_command` it prints (`agrmcp setup --target <cli>`; add `--force` for `disabled` / `conflict`), and restart the client |
 | `orch_*` tools or skill missing only inside an IDE/ACP host | Host uses a private config dir | §3 "Isolated / ACP host config directories" |
+| Codex on Windows fails with `SANDBOX_UNAVAILABLE` | Codex could not start its OS sandbox (restricted token / ACL setup failed). The harness enters a 600 s cooldown; `safe_to_reroute` is true in `readonly` / `worktree` runs (in `shared` / write runs only when no tool call ran and the working tree stayed unchanged) and `suggested_alternatives` lists other harnesses | Follow `error.details.hints`: avoid OneDrive and UNC (`\\server\share`) paths, keep the project path under 240 characters, keep `TEMP`/`TMP` under `%USERPROFILE%`, and check the user can create restricted tokens and set ACLs there. `agrmcp doctor --json` shows the same advice under `platform_warnings`. Re-route with `exclude_harnesses`; NEVER weaken `-s` / `-a` or other sandbox flags |
+| Claude `readonly` run fails with `AUTH_REQUIRED` although `claude` works in a terminal | `--restricted` hides your shell login. The harness forwards only a strict allowlist of Anthropic / Bedrock / Vertex / Foundry auth and endpoint variables found in the user-level `settings.json` `env` block (names only, never proxy, CA, or custom-header variables). A group gate refuses mixing env-variable auth with file-based auth, and a `settings.json` inside the repo or worktree is rejected | `agrmcp doctor --json` lists `claude_readonly_forwarded_env` (names only). Put the auth variables in the user-level `settings.json`, or run `claude auth login` again (patterns such as `Failed to authenticate: OAuth session expired` map to `AUTH_REQUIRED`). Do not drop `--restricted` or add `extra_args` to get around it |
 | Job fails with `RECURSION_BLOCKED` | A worker tried to orchestrate again; `ORCH_DEPTH` exceeded `orch_max_depth` (default 1) | Expected guard. Do the nested work in the worker directly; do not raise `orch_max_depth` unless the user asks |
 | Worktree job misses your latest edits or fails on missing deps | Worktrees branch from `HEAD`; uncommitted edits and untracked `node_modules` are not copied | Use `shared` isolation for work depending on uncommitted edits, or let the worker install deps; never commit/stash for the user |
 | `orch_*` call returns `INVALID_INPUT` | A required argument is missing or blank, or a value is out of range (for example `shards` outside 1–8; `shards: 1` is accepted and equals omitting it) | Read `error.details.missing` and `error.details.example`, fix the call, and resend. Unknown argument names appear in `ignored_arguments` with closest-key hints (for example `model` belongs in `override.model`) |
@@ -764,6 +768,6 @@ Source of truth: [`src/mcp/tools.ts`](../src/mcp/tools.ts) and [`src/types.ts`](
 
 **`orch_logs` `part` (`LogPart`):** `summary` (default), `stdout`, `stderr`, `diff`, `files`, `checkpoint`.
 
-**`error.code` (`ErrorCode`):** `CLI_NOT_FOUND`, `AUTH_REQUIRED`, `QUOTA_EXCEEDED`, `RATE_LIMITED`, `PROVIDER_OVERLOADED`, `RECURSION_BLOCKED`, `CONCURRENCY_LIMIT`, `QUEUE_FULL`, `INVALID_CWD`, `MODEL_UNSUPPORTED`, `HARNESS_UNAVAILABLE`, `DELEGATION_UNAVAILABLE`, `SANDBOX_POLICY_VIOLATION`, `PROMPT_TOO_LARGE`, `PLAN_REQUIRED`, `PLAN_NOT_FOUND`, `INVALID_INPUT`, `IDEMPOTENCY_CONFLICT`, `TIMEOUT`, `NON_ZERO_EXIT`, `PARSE_ERROR`, `WORKTREE_ERROR`, `CANCELLED`, `INTERNAL_ERROR`. `QUEUE_FULL` and `CONCURRENCY_LIMIT` are local capacity limits: wait for running jobs or lower the parallelism instead of rerouting.
+**`error.code` (`ErrorCode`):** `CLI_NOT_FOUND`, `AUTH_REQUIRED`, `QUOTA_EXCEEDED`, `RATE_LIMITED`, `PROVIDER_OVERLOADED`, `RECURSION_BLOCKED`, `CONCURRENCY_LIMIT`, `QUEUE_FULL`, `INVALID_CWD`, `MODEL_UNSUPPORTED`, `HARNESS_UNAVAILABLE`, `DELEGATION_UNAVAILABLE`, `SANDBOX_POLICY_VIOLATION`, `SANDBOX_UNAVAILABLE`, `PROMPT_TOO_LARGE`, `PLAN_REQUIRED`, `PLAN_NOT_FOUND`, `INVALID_INPUT`, `IDEMPOTENCY_CONFLICT`, `TIMEOUT`, `NON_ZERO_EXIT`, `PARSE_ERROR`, `WORKTREE_ERROR`, `CANCELLED`, `INTERNAL_ERROR`. `QUEUE_FULL` and `CONCURRENCY_LIMIT` are local capacity limits: wait for running jobs or lower the parallelism instead of rerouting. `SANDBOX_UNAVAILABLE` means the harness could not start its OS sandbox (typically Codex on Windows); it is harness-scoped, starts a 600 s cooldown, and carries `details.hints` (see §5).
 
 `ORCH_MCP_MAX_WAIT_MS` sets the MCP wait cap in milliseconds. The server automatically calibrates each wait to the host timeout; the maximum is 600 seconds.

@@ -22,6 +22,7 @@ import type { DiscoverModelsOptions, DiscoveryCandidate, DiscoveryPreviewResult 
 import type { DiscoveryConfig } from "../discovery/service.js";
 import type { ImportModelBatch } from "../config/writer.js";
 import { inferVendorFamily } from "../roles/registry.js";
+import { resolveWindowsSystemBinary } from "../runtime/process-tree.js";
 import { logger, redactSecrets } from "../logging.js";
 import type { HarnessHealth } from "../types.js";
 
@@ -599,21 +600,64 @@ class InstanceLock {
   }
 }
 
-function openInBrowser(url: string): void {
-  const [command, args] = process.platform === "darwin"
-    ? ["open", [url]]
-    : process.platform === "win32"
-      ? ["cmd", ["/c", "start", "", url]]
-      : ["xdg-open", [url]];
-  try {
-    const child = spawn(command, args as string[], { detached: true, stdio: "ignore" });
-    child.on("error", () => {
-      logger.info("Could not open a browser automatically; open the settings URL manually");
-    });
-    child.unref();
-  } catch {
-    logger.info("Could not open a browser automatically; open the settings URL manually");
-  }
+/** Test seams of `openInBrowser`. */
+export interface BrowserLaunchDeps {
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  spawnProcess?: typeof spawn;
+  fileExists?: (path: string) => boolean;
+}
+
+interface BrowserLaunch {
+  command: string;
+  args: string[];
+}
+
+const BROWSER_MANUAL_HINT = "Could not open a browser automatically; open the settings URL manually";
+
+/**
+ * Programs tried in order to open `url` in the default browser. On Windows these are system binaries resolved through
+ * `%SystemRoot%\System32` (never a bare name looked up in PATH): `rundll32 url.dll,FileProtocolHandler` shows no console
+ * window and hands the URL over untouched (no `cmd` AutoRun, no `&`/`#` mangling); `cmd /d /c start` is the fallback.
+ */
+function browserLaunches(url: string, platform: NodeJS.Platform, env: NodeJS.ProcessEnv, fileExists?: (path: string) => boolean): BrowserLaunch[] {
+  if (platform === "darwin") return [{ command: "open", args: [url] }];
+  if (platform !== "win32") return [{ command: "xdg-open", args: [url] }];
+  const rundll32 = resolveWindowsSystemBinary(["rundll32.exe"], env, fileExists);
+  const cmd = resolveWindowsSystemBinary(["cmd.exe"], env, fileExists);
+  return [
+    ...(rundll32 === undefined ? [] : [{ command: rundll32, args: ["url.dll,FileProtocolHandler", url] }]),
+    ...(cmd === undefined ? [] : [{ command: cmd, args: ["/d", "/c", "start", "", url] }]),
+  ];
+}
+
+export function openInBrowser(url: string, deps: BrowserLaunchDeps = {}): void {
+  const spawnProcess = deps.spawnProcess ?? spawn;
+  const launches = browserLaunches(url, deps.platform ?? process.platform, deps.env ?? process.env, deps.fileExists);
+  const attempt = (index: number): void => {
+    const launch = launches[index];
+    if (launch === undefined) {
+      logger.info(BROWSER_MANUAL_HINT);
+      return;
+    }
+    try {
+      const child = spawnProcess(launch.command, launch.args, { detached: true, windowsHide: true, stdio: "ignore" });
+      // A launcher can fail by not starting (`error`) or by starting and exiting non-zero (`rundll32` with no handler); either
+      // moves on to the next launcher, once, even when both events fire.
+      let fellBack = false;
+      const fallBack = (): void => {
+        if (fellBack) return;
+        fellBack = true;
+        attempt(index + 1);
+      };
+      child.on("error", fallBack);
+      child.on("exit", (code) => { if (code !== null && code !== 0) fallBack(); });
+      child.unref();
+    } catch {
+      attempt(index + 1);
+    }
+  };
+  attempt(0);
 }
 
 function loadAppHtml(): string {

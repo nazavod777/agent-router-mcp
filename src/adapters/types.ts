@@ -29,6 +29,8 @@ export interface BuildInvocationInput {
   prompt: string;
   systemContext?: string;
   cwd: string;
+  /** The checkout the job was started for when `cwd` is a git worktree created from it; absent when both are the same. */
+  sourceCwd?: string;
   /** Private 0700 directory for per-job temp files (system prompt, -o file, dsh patch). */
   jobDir: string;
   inheritMcp: boolean;
@@ -41,6 +43,11 @@ export interface BuildInvocationInput {
   nativeSubagents?: NativeSubagentsControl;
   /** Aborted when the job is cancelled, times out or the runner shuts down; the runner stops waiting for setup then. */
   signal?: AbortSignal;
+  /**
+   * The child environment snapshot (before `envOverrides`) the runner will spawn the CLI with, so adapters and the spawned
+   * child see identical variables. Direct callers and tests may omit it; adapters then fall back to `process.env`.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface BuiltInvocation {
@@ -48,6 +55,8 @@ export interface BuiltInvocation {
   args: string[];
   stdin: string;
   envOverrides?: Record<string, string>;
+  /** Secret values the adapter loaded from user config files; the runner redacts them from every log, result and error. */
+  secrets?: string[];
   /** Optional path where the CLI writes its final message (e.g. codex -o). */
   outputFile?: string;
   /** Per-job temp files created with 0600 permissions; runner removes them after process exit. */
@@ -69,6 +78,8 @@ export interface FinishParseInput {
   outputFileContent?: string;
   stdoutTruncated: boolean;
   oversizedLinesDropped: number;
+  /** Secret values of this job (environment credentials and adapter-loaded ones) to redact from anything the parser returns. */
+  extraSecrets?: readonly string[];
 }
 
 export interface ParsedAdapterResult {

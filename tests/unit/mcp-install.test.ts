@@ -129,8 +129,9 @@ describe("environment overrides and legacy layouts", () => {
     expect(layoutOf(withEnv, "opencode").configPath).toBe(explicit);
     expect(layoutOf(withEnv, "opencode").skillDir).toBe(join(fx.home, ".config/opencode/skills/orchestrate"));
 
+    // An explicit OPENCODE_CONFIG that does not exist yet is still where the config is written.
     const missing = makeFixture({ homeDir: fx.home, env: { OPENCODE_CONFIG: join(fx.root, "nope.json") } });
-    expect(layoutOf(missing, "opencode").configPath).toBe(join(fx.home, ".config/opencode/opencode.jsonc"));
+    expect(layoutOf(missing, "opencode").configPath).toBe(join(fx.root, "nope.json"));
   });
 
   it("antigravity targets the legacy path only when it exists and the new one does not", () => {

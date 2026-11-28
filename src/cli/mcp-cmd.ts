@@ -1,7 +1,7 @@
 import { parseArgs } from "node:util";
 import {
   createInstallContext, fixAdvice, hasDrift, inspectClient, installMcpClient, isMcpFailure, parseTargetList, resolveTargets, setupClient,
-  targetUsage, uninstallMcpClient,
+  targetDisplayId, targetUsage, uninstallMcpClient,
   type ClientStatus, type InstallContext, type McpTargetResult, type MutationOptions, type SetupTargetResult,
 } from "./mcp-install.js";
 import { CLI_NAME } from "./name.js";
@@ -12,11 +12,12 @@ const MCP_USAGE = `Usage:
   ${CLI_NAME} mcp install   [--target <cli>|all] [--dry-run] [--force] [--json]
   ${CLI_NAME} mcp status    [--target <cli>|all] [--check] [--json]
   ${CLI_NAME} mcp uninstall [--target <cli>|all] [--dry-run] [--force] [--json]
-Targets: ${targetUsage()}`;
+Targets: ${targetUsage()}
+  antigravity also covers its T3 Code profiles; antigravity:t3:<id> selects one of them (ids are listed by \`mcp status\`).`;
 
 const SETUP_USAGE = `Usage: ${CLI_NAME} setup [--target <cli>|all] [--dry-run] [--force] [--json]
 Registers the MCP server and installs the orchestrate skill for each target (\`all\` = CLIs detected on this machine).
-Targets: ${targetUsage()}`;
+Targets: ${targetUsage()} (antigravity:t3:<id> selects one T3 Code profile)`;
 
 const NO_TARGETS_MESSAGE = `No supported CLI was detected on this machine. Name one explicitly, for example: ${CLI_NAME} setup --target claude`;
 
@@ -40,8 +41,8 @@ function mutationOptions(values: { "dry-run"?: boolean; force?: boolean }): Muta
   return { dryRun: values["dry-run"] === true, force: values.force === true };
 }
 
-function messageLines(results: { client: string; message?: string }[]): string[] {
-  return results.filter((result) => result.message).map((result) => `  ${result.client}: ${result.message}`);
+function messageLines(results: { client: string; instance?: string; message?: string }[]): string[] {
+  return results.filter((result) => result.message).map((result) => `  ${targetDisplayId(result)}: ${result.message}`);
 }
 
 function dryRunNote(dryRun: boolean): string[] {
@@ -50,7 +51,7 @@ function dryRunNote(dryRun: boolean): string[] {
 
 function renderMutation(results: McpTargetResult[], dryRun: boolean): string {
   if (results.length === 0) return NO_TARGETS_MESSAGE;
-  const rows = results.map((result) => [result.client, result.status, result.action, result.status_after, result.config_path]);
+  const rows = results.map((result) => [targetDisplayId(result), result.status, result.action, result.status_after, result.config_path]);
   return [formatTable(["Client", "Before", "Action", "After", "Config"], rows), ...messageLines(results), ...dryRunNote(dryRun)].join("\n");
 }
 
@@ -63,9 +64,9 @@ async function runInstallLike(
     return 0;
   }
   const options = mutationOptions(values);
-  const { specs } = await resolveTargets(ctx, parseTargetList(values.target));
+  const { targets } = await resolveTargets(ctx, parseTargetList(values.target));
   const results: McpTargetResult[] = [];
-  for (const spec of specs) results.push(await (kind === "install" ? installMcpClient : uninstallMcpClient)(spec, ctx, options));
+  for (const target of targets) results.push(await (kind === "install" ? installMcpClient : uninstallMcpClient)(target, ctx, options));
   const failed = results.some(isMcpFailure);
   if (values.json) {
     io.out(JSON.stringify({ command: kind, dry_run: options.dryRun, force: options.force, node_path: ctx.nodePath, entry_path: ctx.entryPath, ok: !failed, targets: results }, null, 2));
@@ -77,11 +78,11 @@ async function runInstallLike(
 
 function renderStatus(statuses: ClientStatus[]): string {
   if (statuses.length === 0) return NO_TARGETS_MESSAGE;
-  const rows = statuses.map((status) => [status.client, status.detected ? "yes" : "no", status.mcp_status, status.skill_status, status.config_path]);
+  const rows = statuses.map((status) => [targetDisplayId(status), status.detected ? "yes" : "no", status.mcp_status, status.skill_status, status.config_path]);
   const details = statuses.flatMap((status) => [
-    ...(status.mcp_detail ? [`  ${status.client}: ${status.mcp_detail}`] : []),
-    ...(status.skill_error ? [`  ${status.client}: skill: ${status.skill_error}`] : []),
-    ...(fixAdvice(status) ? [`  ${status.client}: ${fixAdvice(status)}`] : []),
+    ...(status.mcp_detail ? [`  ${targetDisplayId(status)}: ${status.mcp_detail}`] : []),
+    ...(status.skill_error ? [`  ${targetDisplayId(status)}: skill: ${status.skill_error}`] : []),
+    ...(fixAdvice(status) ? [`  ${targetDisplayId(status)}: ${fixAdvice(status)}`] : []),
   ]);
   return [formatTable(["Client", "Detected", "MCP", "Skill", "Config"], rows), ...details].join("\n");
 }
@@ -92,8 +93,8 @@ async function runStatus(args: string[], io: CliIo, ctx: InstallContext): Promis
     io.out(MCP_USAGE);
     return 0;
   }
-  const { specs } = await resolveTargets(ctx, parseTargetList(values.target));
-  const statuses = await Promise.all(specs.map((spec) => inspectClient(spec, ctx)));
+  const { targets } = await resolveTargets(ctx, parseTargetList(values.target));
+  const statuses = await Promise.all(targets.map((target) => inspectClient(target, ctx)));
   const drift = statuses.some(hasDrift);
   io.out(values.json ? JSON.stringify({ command: "status", node_path: ctx.nodePath, entry_path: ctx.entryPath, drift, targets: statuses }, null, 2) : renderStatus(statuses));
   return values.check && drift ? 1 : 0;
@@ -120,13 +121,13 @@ export async function runMcpCommand(args: string[], io: CliIo = processIo, ctx: 
 function renderSetup(results: SetupTargetResult[], dryRun: boolean): string {
   if (results.length === 0) return NO_TARGETS_MESSAGE;
   const rows = results.map((result) => [
-    result.mcp.client, `${result.mcp.status} -> ${result.mcp.action}`, `${result.skill.status} -> ${result.skill.action}`,
+    targetDisplayId(result.mcp), `${result.mcp.status} -> ${result.mcp.action}`, `${result.skill.status} -> ${result.skill.action}`,
     dryRun ? "n/a" : result.verified ? "yes" : "no", result.mcp.config_path,
   ]);
   const messages = results.flatMap((result) => [
-    ...(result.mcp.message ? [`  ${result.mcp.client}: ${result.mcp.message}`] : []),
-    ...(result.skill.message ? [`  ${result.mcp.client}: skill: ${result.skill.message}`] : []),
-    ...(!dryRun && result.unverified_reason ? [`  ${result.mcp.client}: not verified: ${result.unverified_reason}`] : []),
+    ...(result.mcp.message ? [`  ${targetDisplayId(result.mcp)}: ${result.mcp.message}`] : []),
+    ...(result.skill.message ? [`  ${targetDisplayId(result.mcp)}: skill: ${result.skill.message}`] : []),
+    ...(!dryRun && result.unverified_reason ? [`  ${targetDisplayId(result.mcp)}: not verified: ${result.unverified_reason}`] : []),
   ]);
   return [formatTable(["Client", "MCP", "Skill", "Verified", "Config"], rows), ...messages, ...dryRunNote(dryRun)].join("\n");
 }
@@ -138,9 +139,9 @@ export async function runSetupCommand(args: string[], io: CliIo = processIo, ctx
     return 0;
   }
   const options = mutationOptions(values);
-  const { specs } = await resolveTargets(ctx, parseTargetList(values.target));
+  const { targets } = await resolveTargets(ctx, parseTargetList(values.target));
   const results: SetupTargetResult[] = [];
-  for (const spec of specs) results.push(await setupClient(spec, ctx, options));
+  for (const target of targets) results.push(await setupClient(target, ctx, options));
   const failed = results.some((result) => !result.ok);
   io.out(values.json
     ? JSON.stringify({ command: "setup", dry_run: options.dryRun, force: options.force, node_path: ctx.nodePath, entry_path: ctx.entryPath, ok: !failed, targets: results }, null, 2)

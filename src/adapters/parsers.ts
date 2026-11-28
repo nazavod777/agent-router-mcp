@@ -34,12 +34,16 @@ export function assertArgvPromptFits(label: string, prompt: string): void {
   }
 }
 
-/** CreateProcess rejects a command line longer than this many characters in total (program, arguments, quoting). */
-export const MAX_WINDOWS_COMMAND_LINE_CHARS = 32_767;
+/**
+ * `CreateProcessW` accepts a command line of at most 32,767 UTF-16 code units INCLUDING the terminating NUL, so the text
+ * itself (program, arguments, quoting, separators) may be at most 32,766 code units long.
+ */
+export const MAX_WINDOWS_COMMAND_LINE_CHARS = 32_767 - 1;
 
 /** Length of one argument after the quoting and escaping Windows' command-line rules apply to it. */
 function windowsQuotedLength(arg: string): number {
-  if (arg !== "" && !/[\s"]/.test(arg)) return arg.length;
+  // libuv (src/win/process.c) quotes an argument only when it is empty or holds a space, a tab or a double quote.
+  if (arg !== "" && !/[ \t"]/.test(arg)) return arg.length;
   let length = arg.length + 2;
   let backslashRun = 0;
   for (const char of arg) {
@@ -63,7 +67,7 @@ export function windowsCommandLineLength(command: string, args: readonly string[
   return [command, ...args].reduce((total, part) => total + windowsQuotedLength(part) + 1, -1);
 }
 
-/** Throws PROMPT_TOO_LARGE when the whole command line exceeds the Windows limit (a no-op on other platforms). */
+/** Throws PROMPT_TOO_LARGE when the whole command line (without its NUL) exceeds 32,766 code units (a no-op on other platforms). */
 export function assertCommandLineFits(
   label: string, command: string, args: readonly string[], platform: NodeJS.Platform = process.platform,
 ): void {
@@ -138,9 +142,10 @@ function configOverrideValues(args: readonly string[]): string[] {
 
 /** Throws when a `-c`/`--config` override assigns a key matched by `forbiddenKey` (the regex is tested against `key=value`). */
 export function assertNoForbiddenReadonlyConfigOverrides(
-  label: string, extraArgs: readonly string[], forbiddenKey: RegExp, readonly = true,
+  label: string, extraArgs: readonly string[], forbiddenKey: RegExp | ((value: string) => boolean), readonly = true,
 ): void {
-  const match = configOverrideValues(extraArgs).find((value) => forbiddenKey.test(value));
+  const isForbidden = typeof forbiddenKey === "function" ? forbiddenKey : (value: string) => forbiddenKey.test(value);
+  const match = configOverrideValues(extraArgs).find(isForbidden);
   if (match !== undefined) throw readonlyPolicyViolation(label, match, readonly);
 }
 
@@ -152,8 +157,8 @@ export interface SandboxArgsPolicy {
   readonlyForbidden: RegExp;
   /** Flags that drop the sandbox or approvals of a write run; refused in write mode unless unsandboxed writes are allowed. */
   writeForbidden?: RegExp;
-  /** `-c key=value` overrides refused in the same two situations (the regex is tested against `key=value`). */
-  forbiddenConfigKey?: RegExp;
+  /** `-c key=value` overrides refused in the same two situations (a regex is tested against `key=value`; a function gets it too). */
+  forbiddenConfigKey?: RegExp | ((value: string) => boolean);
 }
 
 /**
@@ -209,7 +214,8 @@ export class BoundedMessages {
   push(message: string): void {
     const room = this.limitBytes - this.bytes;
     if (room <= 0 || this.messages.length >= this.maxEntries) return;
-    const clipped = truncateUtf8(message, room).text;
+    // Redacted before it is cut, so a secret straddling the cut cannot leave a recognizable prefix behind.
+    const clipped = truncateUtf8(redactSecrets(message), room).text;
     if (clipped === "") return;
     this.messages.push(clipped);
     this.bytes += Buffer.byteLength(clipped);
@@ -327,10 +333,12 @@ export function createJsonResultParser(spec: JsonResultParserSpec): AdapterStrea
         // Answer text only counts as diagnostics when the CLI flagged an error; with a bare non-zero exit it is model
         // prose (a review may mention "quota" or "rate limit") and must not drive failure classification.
         const reported = latest.isError ? latest.errorMessage || text || undefined : latest.errorMessage || undefined;
+        // When the "answer" is just the error message, it stays out of the summary (it is already the error).
+        const textIsTheError = latest.isError === true && (!latest.errorMessage || latest.text === latest.errorMessage);
         return classifiedFailure(spec.label, input, reported, code, {
           usage: latest.usage,
           warnings,
-          summary: text,
+          summary: textIsTheError ? "" : text,
           details: latest.details,
         });
       }

@@ -48,11 +48,37 @@ function jsonEscaped(value: string): string {
   return JSON.stringify(value).slice(1, -1);
 }
 
+const MIN_REGISTERED_SECRET_LENGTH = 8;
+const MAX_REGISTERED_SECRETS = 256;
+/** Insertion-ordered, so the oldest value is evicted first once the cap is reached. */
+const registeredSecrets = new Set<string>();
+
+/**
+ * Remembers secret values (for example credentials an adapter read from a user config file) so every later redaction in
+ * this process masks them. Bounded: values shorter than 8 characters are ignored and the oldest entry is evicted past 256.
+ */
+export function registerSecretValues(values: readonly string[]): void {
+  for (const value of values) {
+    if (value.length < MIN_REGISTERED_SECRET_LENGTH) continue;
+    // Re-registering moves a value to the newest position.
+    registeredSecrets.delete(value);
+    registeredSecrets.add(value);
+    while (registeredSecrets.size > MAX_REGISTERED_SECRETS) {
+      registeredSecrets.delete(registeredSecrets.values().next().value as string);
+    }
+  }
+}
+
+/** Test seam: forgets every registered secret value. */
+export function clearRegisteredSecretValues(): void {
+  registeredSecrets.clear();
+}
+
 export function createSecretRedactor(extraSecrets: string[] = []): (text: string) => string {
   const envSecrets = Object.entries(process.env).flatMap(([name, value]) =>
     SECRET_ENV_NAME.test(name) && value && value.length >= 8 ? [value] : [],
   );
-  const known = [...new Set([...extraSecrets, ...envSecrets])].filter(Boolean);
+  const known = [...new Set([...extraSecrets, ...registeredSecrets, ...envSecrets])].filter(Boolean);
   const secrets = [...new Set(known.flatMap((secret) => [secret, jsonEscaped(secret)]))]
     .filter(Boolean)
     .sort((a, b) => b.length - a.length);

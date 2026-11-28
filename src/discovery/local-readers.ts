@@ -22,6 +22,7 @@ import { performance } from "node:perf_hooks";
 import { parse as parseToml } from "smol-toml";
 import { parseDocument as parseYamlDocument } from "yaml";
 import { stripJsoncComments } from "../config/cli-limits.js";
+import { getEnvValue } from "../runtime/guard.js";
 import type { DriverKind } from "../drivers.js";
 import {
   MAX_MODELS_PER_SOURCE, type DiscoveredModel, type DiscoveryDiagnostic, type DiscoveryObservation, type LocalReadInput,
@@ -440,7 +441,7 @@ function pathModule(platform: NodeJS.Platform): PathModule {
 
 /** A path named by an environment variable; a relative value resolves against the injected cwd, never the process cwd. */
 function envPath(ctx: Context, name: string): string | undefined {
-  const value = ctx.input.env[name];
+  const value = getEnvValue(ctx.input.env, name, ctx.input.platform);
   if (typeof value !== "string" || value === "") return undefined;
   const { path } = ctx;
   return path.isAbsolute(value) ? path.normalize(value) : path.join(ctx.input.cwd, value);
@@ -618,7 +619,8 @@ const readGemini: Reader = async (ctx) => {
 };
 
 const readAntigravity: Reader = async (ctx) => {
-  const settings = await loadData(ctx, ctx.path.join(ctx.input.homeDir, ".gemini", "antigravity-cli", "settings.json"), "json");
+  const base = envPath(ctx, "GEMINI_HOME") ?? ctx.path.join(ctx.input.homeDir, ".gemini");
+  const settings = await loadData(ctx, ctx.path.join(base, "antigravity-cli", "settings.json"), "json");
   addModel(ctx, { model: own(settings, "model"), provider: own(settings, "modelProvider") });
   for (const custom of listOf(ctx, at(settings, "customModelsConfig", "customModels"))) {
     addModel(ctx, { model: own(custom, "modelName"), displayName: own(custom, "label") });

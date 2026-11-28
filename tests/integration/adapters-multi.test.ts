@@ -232,6 +232,7 @@ describe("driver-specific contracts", () => {
       ],
     });
     request.model.efforts = ["default"];
+    request.effort = "default";
     request.mode = "write";
     const write = await adapter.buildInvocation(request);
     containsSequence(write.args, ["--model", "test-provider/demo"]);

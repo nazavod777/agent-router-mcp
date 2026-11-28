@@ -48,12 +48,15 @@ const COMMON_EXACT_ENV_NAMES: ReadonlySet<string> = new Set([
   "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "LANG", "LC_ALL", "LC_CTYPE",
 ]);
 
+const COMMON_EXACT_ENV_NAMES_UPPER: ReadonlySet<string> = new Set([...COMMON_EXACT_ENV_NAMES].map((name) => name.toUpperCase()));
+
 /** Home/config directory variables that move the CLI's own state; only the probed driver's are passed on. */
 const DRIVER_ENV_NAMES: Partial<Record<DriverKind, readonly string[]>> = {
   pi: ["PI_CODING_AGENT_DIR"],
   opencode: ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR"],
   codex: ["CODEX_HOME"],
   gemini: ["GEMINI_CLI_HOME"],
+  antigravity: ["GEMINI_HOME"],
   dsh: ["DSH_HOME"],
   grok: ["GROK_HOME"],
   fx: ["FX_HOME"],
@@ -65,21 +68,42 @@ const DRIVER_ENV_NAMES: Partial<Record<DriverKind, readonly string[]>> = {
   vibe: ["VIBE_HOME"],
 };
 
+/** Value of an environment variable; on Windows the name matches regardless of case (`Path` is `PATH`). */
+function envValue(env: NodeJS.ProcessEnv, name: string, windows: boolean): string | undefined {
+  if (Object.hasOwn(env, name)) return env[name];
+  if (!windows) return undefined;
+  const key = Object.keys(env).find((candidate) => candidate.toUpperCase() === name.toUpperCase());
+  return key === undefined ? undefined : env[key];
+}
+
 /**
  * The only environment a listing probe sees: an allowlist, never a copy of the parent environment. API keys, tokens,
  * `NODE_OPTIONS`, `LD_*`, `DYLD_*`, and proxy variables are therefore dropped. The `ORCH_JOB_ID` marker is added by the
- * runner, not here.
+ * runner, not here. On Windows every allowlisted name matches regardless of case (`Path`, `SystemRoot`, `Codex_Home`)
+ * and a name present in several spellings is kept once, so the child never sees duplicate differently-cased variables.
  */
-export function buildProbeEnv(source: NodeJS.ProcessEnv, driver: DriverKind): NodeJS.ProcessEnv {
-  const driverNames = new Set(DRIVER_ENV_NAMES[driver] ?? []);
+export function buildProbeEnv(source: NodeJS.ProcessEnv, driver: DriverKind, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  const windows = platform === "win32";
+  const driverNames = new Set((DRIVER_ENV_NAMES[driver] ?? []).map((name) => (windows ? name.toUpperCase() : name)));
   const env: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(source)) {
+  const keptWindowsNames = new Set<string>();
+  // Windows keeps one spelling of a name; like `getEnvValue`, the exact canonical spelling (`PATH`) wins over `Path`.
+  const canonicalNames = new Set<string>([...COMMON_ENV_NAMES, ...COMMON_EXACT_ENV_NAMES, ...(DRIVER_ENV_NAMES[driver] ?? [])]);
+  const entries = Object.entries(source);
+  const ordered = windows ? [...entries.filter(([name]) => canonicalNames.has(name)), ...entries.filter(([name]) => !canonicalNames.has(name))] : entries;
+  for (const [name, value] of ordered) {
     if (value === undefined) continue;
     const upper = name.toUpperCase();
+    const folded = windows ? upper : name;
     const allowed = COMMON_ENV_NAMES.has(upper)
-      || COMMON_EXACT_ENV_NAMES.has(name)
-      || driverNames.has(name);
-    if (allowed) env[name] = value;
+      || (windows ? COMMON_EXACT_ENV_NAMES_UPPER.has(upper) : COMMON_EXACT_ENV_NAMES.has(name))
+      || driverNames.has(folded);
+    if (!allowed || (windows && keptWindowsNames.has(upper))) continue;
+    keptWindowsNames.add(upper);
+    env[name] = value;
+  }
+  if (windows) {
+    for (const name of Object.keys(env)) if (name.toUpperCase() === "NO_COLOR") delete env[name];
   }
   env.NO_COLOR = "1";
   return env;
@@ -172,7 +196,7 @@ export const defaultExecProbe: ExecProbe = (request: ProbeRunRequest): Promise<P
       const pid = child?.pid;
       if (pid === undefined) return;
       try {
-        await terminateProcessTree({ pid, jobId, graceMs: PROBE_TERMINATE_GRACE_MS });
+        await terminateProcessTree({ pid, jobId, graceMs: PROBE_TERMINATE_GRACE_MS, verifyDescendants: false });
       } catch (error) {
         logger.warn("Could not terminate the process tree of a discovery probe.", {
           error: error instanceof Error ? error.message : String(error),
@@ -753,10 +777,11 @@ function failureDiagnostic(driver: DriverKind, command: string, result: ProbeRun
  */
 function resolveProbeLaunch(input: CliProbeInput): LaunchCommand | DiscoveryDiagnostic {
   const { driver } = input;
+  const windows = input.platform === "win32";
   const binary = resolveBinary(input.harness.binary, {
     platform: input.platform,
-    pathEnv: input.env.PATH ?? input.env.Path ?? "",
-    pathExt: input.env.PATHEXT,
+    pathEnv: envValue(input.env, "PATH", windows) ?? input.env.Path ?? "",
+    pathExt: envValue(input.env, "PATHEXT", windows),
     baseDir: dirname(getUserConfigPath(input.env, input.homeDir)),
   });
   if (binary === undefined) return probeDiagnostic("binary_missing", `${driver} binary was not found`);
@@ -780,7 +805,7 @@ function helpBinaryNames(input: CliProbeInput): ReadonlySet<string> {
 async function runListing(input: CliProbeInput, spec: ListingSpec, launch: LaunchCommand, cwd: string): Promise<DiscoveryObservation> {
   const { driver } = input;
   const execProbe = input.execProbe ?? defaultExecProbe;
-  const env = buildProbeEnv(input.env, driver);
+  const env = buildProbeEnv(input.env, driver, input.platform);
   const run = (args: readonly string[]): Promise<ProbeRunResult> => execProbe({
     command: launch.command,
     args: [...launch.prefixArgs, ...args],

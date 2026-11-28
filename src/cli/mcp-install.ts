@@ -7,8 +7,10 @@ import { redactSecrets } from "../logging.js";
 import { atomicWriteFile, readTextIfExists } from "./atomic-file.js";
 import { getNodeAt, isPlainObject, nodeToValue, parseJsonc, removeValueAt, setValueAt, type JsonValue } from "./jsonc-edit.js";
 import {
-  CLIENTS, CLIENT_IDS, DSH_ENTRY_ID, DSH_MCP_PLUGIN, SERVER_NAME, canonicalArgv, classifyEntry, detectClient, isClientId,
-  type ClassifyOptions, type ClientId, type ClientLayout, type ClientSpec, type ConfigFormat, type EntryView, type InstallContext, type McpStatus,
+  CLIENTS, CLIENT_IDS, DSH_ENTRY_ID, DSH_MCP_PLUGIN, PRIMARY_INSTANCE, SERVER_NAME, assertInstanceConfigWritable, assertInstanceSkillWritable,
+  canonicalArgv, classifyEntry, detectClient, expandClientTargets, isClientId,
+  toTarget,
+  type ClassifyOptions, type ClientId, type ClientLayout, type ClientSpec, type ClientTarget, type ConfigFormat, type EntryView, type InstallContext, type McpStatus,
 } from "./mcp-clients.js";
 import { CLI_NAME } from "./name.js";
 import { inspectSkill, installSkillDir, type SkillAction, type SkillStatus } from "./skill-install.js";
@@ -481,6 +483,7 @@ function createAdapter(spec: ClientSpec, ctx: InstallContext): Adapter {
 // ---------------------------------------------------------------------------
 
 export interface McpInspection {
+  target: ClientTarget;
   spec: ClientSpec;
   layout: ClientLayout;
   adapter: Adapter;
@@ -514,20 +517,23 @@ function evaluate(adapter: Adapter, text: string | undefined, ctx: InstallContex
   return { status, detail: inspection.view && status !== "current" ? describeEntry(inspection.view) : undefined };
 }
 
-export async function inspectMcp(spec: ClientSpec, ctx: InstallContext): Promise<McpInspection> {
-  const layout = spec.layout(ctx);
+export async function inspectMcp(input: ClientSpec | ClientTarget, ctx: InstallContext): Promise<McpInspection> {
+  const target = toTarget(input, ctx);
+  const { spec, layout } = target;
   const adapter = createAdapter(spec, ctx);
   let text: string | undefined;
   try {
     text = await readTextIfExists(layout.configPath);
   } catch (error) {
-    return { spec, layout, adapter, text: undefined, status: "invalid", detail: redactSecrets(`cannot read ${layout.configPath}: ${error instanceof Error ? error.message : String(error)}`) };
+    return { target, spec, layout, adapter, text: undefined, status: "invalid", detail: redactSecrets(`cannot read ${layout.configPath}: ${error instanceof Error ? error.message : String(error)}`) };
   }
-  return { spec, layout, adapter, text, ...evaluate(adapter, text, ctx) };
+  return { target, spec, layout, adapter, text, ...evaluate(adapter, text, ctx) };
 }
 
 export interface McpTargetResult {
   client: ClientId;
+  /** Instance of the client (for example `t3:1a2b3c4d5e6f`); absent for the primary location. */
+  instance?: string;
   label: string;
   format: ConfigFormat;
   config_path: string;
@@ -550,10 +556,10 @@ export interface MutationOptions {
 }
 
 async function baseResult(inspection: McpInspection, ctx: InstallContext): Promise<McpTargetResult> {
-  const detection = await detectClient(inspection.spec, ctx);
-  const { spec, layout } = inspection;
+  const detection = await detectClient(inspection.target, ctx);
+  const { spec, layout, target } = inspection;
   return {
-    client: spec.id, label: spec.label, format: spec.format, config_path: layout.configPath,
+    client: spec.id, ...(target.instance !== undefined ? { instance: target.instance } : {}), label: spec.label, format: spec.format, config_path: layout.configPath,
     skill_path: layout.skillDir, detected: detection.detected, detected_by: detection.reasons,
     status: inspection.status, status_after: inspection.status, action: "unchanged",
   };
@@ -592,6 +598,11 @@ async function commit(
     return { ...result, action: "error", message: redactSecrets(`refusing to write: the edited config would be ${check.status}${check.detail ? ` (${check.detail})` : ""}`) };
   }
   if (changesUnrelatedContent(inspection.adapter, inspection.text, next)) return { ...result, action: "error", message: UNRELATED_CHANGE_REFUSAL };
+  try {
+    assertInstanceConfigWritable(inspection.target, ctx);
+  } catch (error) {
+    return { ...result, action: "error", message: errorMessage(error) };
+  }
   result.status_after = expected;
   result.file_created = inspection.text === undefined;
   if (options.dryRun) return result;
@@ -601,18 +612,18 @@ async function commit(
   } catch (error) {
     return { ...result, action: "error", status_after: result.status, message: errorMessage(error) };
   }
-  const after = await inspectMcp(inspection.spec, ctx);
+  const after = await inspectMcp(inspection.target, ctx);
   result.status_after = after.status;
   if (after.status !== expected) return { ...result, action: "error", message: `verification failed: the config reads back as ${after.status}` };
   return result;
 }
 
-export async function installMcpClient(spec: ClientSpec, ctx: InstallContext, options: MutationOptions): Promise<McpTargetResult> {
-  return redactResult(await installEntry(spec, ctx, options));
+export async function installMcpClient(target: ClientSpec | ClientTarget, ctx: InstallContext, options: MutationOptions): Promise<McpTargetResult> {
+  return redactResult(await installEntry(target, ctx, options));
 }
 
-async function installEntry(spec: ClientSpec, ctx: InstallContext, options: MutationOptions): Promise<McpTargetResult> {
-  const inspection = await inspectMcp(spec, ctx);
+async function installEntry(target: ClientSpec | ClientTarget, ctx: InstallContext, options: MutationOptions): Promise<McpTargetResult> {
+  const inspection = await inspectMcp(target, ctx);
   const result = await baseResult(inspection, ctx);
   const { status } = inspection;
   if (status === "current") return result;
@@ -636,12 +647,12 @@ async function installEntry(spec: ClientSpec, ctx: InstallContext, options: Muta
   return { ...committed, message: inspection.detail };
 }
 
-export async function uninstallMcpClient(spec: ClientSpec, ctx: InstallContext, options: MutationOptions): Promise<McpTargetResult> {
-  return redactResult(await uninstallEntry(spec, ctx, options));
+export async function uninstallMcpClient(target: ClientSpec | ClientTarget, ctx: InstallContext, options: MutationOptions): Promise<McpTargetResult> {
+  return redactResult(await uninstallEntry(target, ctx, options));
 }
 
-async function uninstallEntry(spec: ClientSpec, ctx: InstallContext, options: MutationOptions): Promise<McpTargetResult> {
-  const inspection = await inspectMcp(spec, ctx);
+async function uninstallEntry(target: ClientSpec | ClientTarget, ctx: InstallContext, options: MutationOptions): Promise<McpTargetResult> {
+  const inspection = await inspectMcp(target, ctx);
   const result = await baseResult(inspection, ctx);
   const { status } = inspection;
   if (status === "missing") return { ...result, message: "no orchestrator entry to remove" };
@@ -664,7 +675,10 @@ async function uninstallEntry(spec: ClientSpec, ctx: InstallContext, options: Mu
 // ---------------------------------------------------------------------------
 
 export interface ResolvedTargets {
+  /** The primary clients selected (instances are only in `targets`). */
   specs: ClientSpec[];
+  /** Every selected location: primaries and instances such as `antigravity:t3:<short>`. */
+  targets: ClientTarget[];
   /** True when `all` was requested (only detected clients are returned). */
   auto: boolean;
 }
@@ -679,19 +693,69 @@ export function targetUsage(): string {
   return `${CLIENT_IDS.join("|")}|all`;
 }
 
-/** `all` selects only clients detected on this machine; explicit ids are always honored. */
-export async function resolveTargets(ctx: InstallContext, requested: readonly string[]): Promise<ResolvedTargets> {
-  const unknown = requested.filter((value) => value !== "all" && !isClientId(value));
+export interface ResolveTargetsOptions {
+  /** Clients that `all` includes even when they are not detected (the skill installer adds the core CLIs this way). */
+  alwaysInclude?: (spec: ClientSpec) => boolean;
+}
+
+/** `antigravity:t3:1a2b3c4d5e6f` -> client id and instance; a plain id has no instance. */
+function splitTarget(value: string): { id: string; instance?: string } {
+  const colon = value.indexOf(":");
+  return colon === -1 ? { id: value } : { id: value.slice(0, colon), instance: value.slice(colon + 1) };
+}
+
+const isKnownTarget = (value: string): boolean => {
+  const { id, instance } = splitTarget(value);
+  return isClientId(id) && (instance === undefined || (instance !== "" && CLIENTS[id].instances !== undefined));
+};
+
+/**
+ * `all` selects the clients detected on this machine plus every instance; explicit ids are always honored (a client with
+ * instances brings them along); `<client>:<instance>` selects exactly that instance and must exist; `<client>:primary`
+ * selects the primary location only, so `--force` on it can never touch an instance.
+ */
+export async function resolveTargets(ctx: InstallContext, requested: readonly string[], options: ResolveTargetsOptions = {}): Promise<ResolvedTargets> {
+  const unknown = requested.filter((value) => value !== "all" && !isKnownTarget(value));
   if (unknown.length > 0) throw new Error(`Unknown target ${unknown.map((value) => JSON.stringify(value)).join(", ")}. Valid targets: ${targetUsage()}.`);
-  if (requested.includes("all")) {
-    const detections = await Promise.all(CLIENT_IDS.map(async (id) => ({ id, detected: (await detectClient(CLIENTS[id], ctx)).detected })));
-    return { specs: detections.filter((entry) => entry.detected).map((entry) => CLIENTS[entry.id]), auto: true };
+  const auto = requested.includes("all");
+  const targets: ClientTarget[] = [];
+  const add = (target: ClientTarget): void => {
+    if (!targets.some((existing) => existing.targetId === target.targetId)) targets.push(target);
+  };
+  if (auto) {
+    const expanded = await Promise.all(CLIENT_IDS.map(async (id) => {
+      const [primary, ...instances] = await expandClientTargets(CLIENTS[id], ctx);
+      const wanted = options.alwaysInclude?.(primary.spec) === true || (await detectClient(primary, ctx)).detected;
+      return [...(wanted ? [primary] : []), ...instances];
+    }));
+    expanded.flat().forEach(add);
   }
-  return { specs: [...new Set(requested as ClientId[])].map((id) => CLIENTS[id]), auto: false };
+  for (const value of requested) {
+    if (value === "all") continue;
+    const { id, instance } = splitTarget(value);
+    const spec = CLIENTS[id as ClientId];
+    const all = await expandClientTargets(spec, ctx);
+    if (instance === undefined) {
+      all.forEach(add);
+      continue;
+    }
+    // `<client>:primary` is the client's own location alone; it never brings its instances along.
+    if (instance === PRIMARY_INSTANCE) {
+      add(all[0]);
+      continue;
+    }
+    const match = all.find((target) => target.instance === instance);
+    if (!match) throw new Error(`Unknown target ${JSON.stringify(value)}. Valid targets: ${targetUsage()}.`);
+    add(match);
+  }
+  const specs = [...new Set(targets.filter((target) => target.instance === undefined).map((target) => target.spec))];
+  return { specs, targets, auto };
 }
 
 export interface ClientStatus {
   client: ClientId;
+  /** Instance of the client (for example `t3:1a2b3c4d5e6f`); absent for the primary location. */
+  instance?: string;
   label: string;
   detected: boolean;
   detected_by: string[];
@@ -706,8 +770,17 @@ export interface ClientStatus {
   fix_command?: string;
 }
 
+/**
+ * The `--target` value that repairs exactly `target`. A primary location of a client that also has instances is named
+ * `<client>:primary`, because the bare client id would expand to every instance and `--force` would overwrite them too.
+ */
+export async function fixTargetId(target: ClientTarget, ctx: InstallContext): Promise<string> {
+  if (target.instance !== undefined || target.spec.instances === undefined) return target.targetId;
+  return (await target.spec.instances(ctx)).length > 0 ? `${target.spec.id}:${PRIMARY_INSTANCE}` : target.targetId;
+}
+
 /** The command that repairs `mcp` for `client`; undefined when there is nothing to fix. For `invalid` it applies after the file is repaired by hand. */
-export function fixCommand(client: ClientId, mcp: McpStatus, skill: SkillStatus): string | undefined {
+export function fixCommand(client: string, mcp: McpStatus, skill: SkillStatus): string | undefined {
   switch (mcp) {
     case "missing":
     case "stale":
@@ -723,21 +796,24 @@ export function fixCommand(client: ClientId, mcp: McpStatus, skill: SkillStatus)
   }
 }
 
-export async function inspectClient(spec: ClientSpec, ctx: InstallContext): Promise<ClientStatus> {
-  const [mcp, detection] = await Promise.all([inspectMcp(spec, ctx), detectClient(spec, ctx)]);
+export async function inspectClient(input: ClientSpec | ClientTarget, ctx: InstallContext): Promise<ClientStatus> {
+  const target = toTarget(input, ctx);
+  const { spec } = target;
+  const [mcp, detection] = await Promise.all([inspectMcp(target, ctx), detectClient(target, ctx)]);
   const skill = await inspectSkill(mcp.layout.skillDir, ctx.skillSourcePath);
   return {
-    client: spec.id, label: spec.label, detected: detection.detected, detected_by: detection.reasons,
+    client: spec.id, ...(target.instance !== undefined ? { instance: target.instance } : {}), label: spec.label, detected: detection.detected, detected_by: detection.reasons,
     config_path: mcp.layout.configPath, skill_path: mcp.layout.skillDir, mcp_status: mcp.status, mcp_detail: mcp.detail,
     skill_status: skill.status, skill_error: skill.error,
     relevant: detection.detected || mcp.status !== "missing" || skill.status !== "missing",
-    fix_command: fixCommand(spec.id, mcp.status, skill.status),
+    fix_command: fixCommand(await fixTargetId(target, ctx), mcp.status, skill.status),
   };
 }
 
 /** Status of every client that is detected or already touched by this tool. */
 export async function inspectRelevantClients(ctx: InstallContext): Promise<ClientStatus[]> {
-  const all = await Promise.all(CLIENT_IDS.map((id) => inspectClient(CLIENTS[id], ctx)));
+  const targets = (await Promise.all(CLIENT_IDS.map((id) => expandClientTargets(CLIENTS[id], ctx)))).flat();
+  const all = await Promise.all(targets.map((target) => inspectClient(target, ctx)));
   return all.filter((status) => status.relevant);
 }
 
@@ -776,11 +852,13 @@ function unverifiedReasonOf(after: ClientStatus, mcp: McpTargetResult): string {
   return redactSecrets(parts.join("; "));
 }
 
-export async function setupClient(spec: ClientSpec, ctx: InstallContext, options: MutationOptions): Promise<SetupTargetResult> {
-  const mcp = await installMcpClient(spec, ctx, options);
+export async function setupClient(input: ClientSpec | ClientTarget, ctx: InstallContext, options: MutationOptions): Promise<SetupTargetResult> {
+  const target = toTarget(input, ctx);
+  const mcp = await installMcpClient(target, ctx, options);
   const before = await inspectSkill(mcp.skill_path, ctx.skillSourcePath);
   const skill: SetupTargetResult["skill"] = { path: before.path, status: before.status, status_after: before.status, action: "unchanged" };
   try {
+    assertInstanceSkillWritable(target, ctx);
     const installed = await installSkillDir(mcp.skill_path, ctx.skillSourcePath, options.dryRun);
     skill.action = installed.action;
     skill.status_after = "current";
@@ -789,7 +867,7 @@ export async function setupClient(spec: ClientSpec, ctx: InstallContext, options
     skill.message = errorMessage(error);
   }
   if (options.dryRun) return { mcp, skill, verified: false, ok: !isMcpFailure(mcp) && skill.action !== "error" };
-  const after = await inspectClient(spec, ctx);
+  const after = await inspectClient(target, ctx);
   skill.status_after = after.skill_status;
   const mcpOk = after.mcp_status === "current" || (after.mcp_status === "disabled" && mcp.action === "skipped");
   const verified = after.mcp_status === "current" && after.skill_status === "current";

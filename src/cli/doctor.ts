@@ -2,6 +2,8 @@ import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, join, posix, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { inspectClaudeReadonlyForwardedEnv } from "../adapters/claude.js";
+import { codexWindowsWarnings } from "../adapters/codex.js";
 import { AdapterRegistry } from "../adapters/registry.js";
 import { discoverAllCliLimits } from "../config/cli-limits.js";
 import type { DiscoveryEnvironment, DiscoveryHints } from "../discovery/index.js";
@@ -12,7 +14,7 @@ import { redactSecrets } from "../logging.js";
 import { resolveHarnessConcurrency } from "../runtime/concurrency.js";
 import type { HarnessConcurrencyInfo, HarnessHealth } from "../types.js";
 import { coldStartBanner } from "./config-cmd.js";
-import { createInstallContext, inspectRelevantClients, type ClientStatus, type InstallContext } from "./mcp-install.js";
+import { createInstallContext, inspectRelevantClients, targetDisplayId, type ClientStatus, type InstallContext } from "./mcp-install.js";
 import { CLI_NAME, LEGACY_CLI_NAMES } from "./name.js";
 import { readNpmShimTarget } from "./npm-shim.js";
 import { formatTable } from "./table.js";
@@ -33,14 +35,15 @@ Checks which harness CLIs are installed and logged in, the configuration, MCP re
  */
 export function mcpClientWarnings(clients: readonly ClientStatus[]): string[] {
   return clients.flatMap((client) => {
+    const id = targetDisplayId(client);
     if (client.mcp_status === "current") {
       if (client.skill_status === "current") return [];
       const reason = client.skill_error ? ` (${client.skill_error})` : "";
-      return [`${client.label} (${client.client}): MCP registration is current but the skill is ${client.skill_status} at ${client.skill_path}${reason}; run \`${client.fix_command}\`.`];
+      return [`${client.label} (${id}): MCP registration is current but the skill is ${client.skill_status} at ${client.skill_path}${reason}; run \`${client.fix_command}\`.`];
     }
     const detail = client.mcp_detail ? ` (${client.mcp_detail})` : "";
     const fix = client.mcp_status === "invalid" ? `fix the syntax in ${client.config_path}, then run \`${client.fix_command}\`` : `run \`${client.fix_command}\``;
-    return [`${client.label} (${client.client}): MCP registration is ${client.mcp_status}${detail}; ${fix}.`];
+    return [`${client.label} (${id}): MCP registration is ${client.mcp_status}${detail}; ${fix}.`];
   });
 }
 
@@ -85,6 +88,45 @@ export function customWrapperWarnings(
     if (!custom || !health.enabled || !failed || !health.note) return [];
     return [`Harness ${JSON.stringify(health.harness)} (custom binary ${JSON.stringify(harness.binary)}) is not usable: ${health.note}`];
   });
+}
+
+export interface PlatformReport {
+  /** Non-secret warnings about the platform the enabled harnesses run on. */
+  warnings: string[];
+  /** Names (never values) of the Claude `settings.json` variables a readonly run forwards to the CLI. */
+  claudeForwardedEnv: string[];
+}
+
+/**
+ * Platform conditions that break an enabled harness: the Codex Windows sandbox limits (Windows only) and the problems
+ * found while reading Claude's user settings for a readonly run, plus the NAMES of the variables that run forwards.
+ */
+export async function platformWarnings(
+  harnesses: ReadonlyArray<Pick<HarnessHealth, "harness" | "driver" | "enabled">>,
+  config: Pick<ConfigSnapshot, "harnesses">,
+  mcpContext: Pick<InstallContext, "env" | "platform" | "homeDir" | "cwd">,
+): Promise<PlatformReport> {
+  const enabled = (driver: string) => harnesses.some((health) =>
+    health.enabled && health.driver === driver && Object.hasOwn(config.harnesses, health.harness));
+  const warnings: string[] = [];
+  if (mcpContext.platform === "win32" && enabled("codex")) {
+    warnings.push(...codexWindowsWarnings(mcpContext.cwd, mcpContext.env, mcpContext.platform));
+  }
+  let claudeForwardedEnv: string[] = [];
+  if (enabled("claude")) {
+    try {
+      const forwarded = await inspectClaudeReadonlyForwardedEnv(mcpContext.env, mcpContext.cwd, { homeDir: mcpContext.homeDir, platform: mcpContext.platform });
+      warnings.push(...forwarded.warnings);
+      claudeForwardedEnv = forwarded.names;
+    } catch {
+      // An unreadable settings file must never break `doctor`; it simply yields no hint.
+    }
+  }
+  return { warnings, claudeForwardedEnv };
+}
+
+export function claudeForwardedEnvLine(names: readonly string[]): string {
+  return `Info: a readonly Claude run forwards these settings.json variables (names only): ${names.join(", ")}.`;
 }
 
 export interface StaleCliLink {
@@ -228,7 +270,9 @@ export async function runDoctorCommand(args: string[], mcpContext: InstallContex
   const manager = new ConfigManager();
   const registry = new AdapterRegistry();
   const config = manager.reloadIfChanged();
-  const cliLimits = await discoverAllCliLimits(config, { refresh: true });
+  const cliLimits = await discoverAllCliLimits(config, {
+    refresh: true, env: mcpContext.env as NodeJS.ProcessEnv, platform: mcpContext.platform, home: mcpContext.homeDir, cwd: mcpContext.cwd,
+  });
   const harnesses = await Promise.all(Object.entries(config.harnesses).map(async ([id, harness]) => ({
     ...await registry.probeHarness(id, harness),
     concurrency: resolveHarnessConcurrency({ harnessId: id, harness, defaults: config.defaults, cliLimits: cliLimits[id] }),
@@ -239,6 +283,7 @@ export async function runDoctorCommand(args: string[], mcpContext: InstallContex
     homeDir: mcpContext.homeDir, env: mcpContext.env as NodeJS.ProcessEnv, platform: mcpContext.platform, cwd: mcpContext.cwd,
     ...options.discovery,
   });
+  const platformReport = await platformWarnings(harnesses, config, mcpContext);
   const mcpClients = await inspectRelevantClients(mcpContext);
   const mcpWarnings = mcpClientWarnings(mcpClients);
   const staleLinks = findStaleCliLinks({
@@ -249,7 +294,9 @@ export async function runDoctorCommand(args: string[], mcpContext: InstallContex
   if (values.json) {
     console.log(JSON.stringify({ ...paths, cold_start_fallback: config.cold_start_fallback, config_warnings: config.config_warnings, config_diagnostics: diagnostics,
       ...(hints !== undefined ? { discovery_hints: hints } : {}), harnesses, mcp_clients: mcpClients, mcp_client_warnings: mcpWarnings,
-      ...(staleLinks.length > 0 ? { stale_cli_links: staleLinks } : {}) },
+      ...(staleLinks.length > 0 ? { stale_cli_links: staleLinks } : {}),
+      ...(platformReport.warnings.length > 0 ? { platform_warnings: platformReport.warnings } : {}),
+      ...(platformReport.claudeForwardedEnv.length > 0 ? { claude_readonly_forwarded_env: platformReport.claudeForwardedEnv } : {}) },
       (_key, value: unknown) => typeof value === "string" ? redactSecrets(value) : value, 2));
     return;
   }
@@ -265,10 +312,12 @@ export async function runDoctorCommand(args: string[], mcpContext: InstallContex
     `Catalog: ${paths.catalog_path}`, `User config: ${paths.user_config_path}`, `State: ${paths.state_dir}`,
     ...config.config_warnings.map((warning) => `Warning: ${warning}`),
     ...diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),
+    ...platformReport.warnings.map((warning) => `Warning: ${warning}`),
+    ...(platformReport.claudeForwardedEnv.length > 0 ? [claudeForwardedEnvLine(platformReport.claudeForwardedEnv)] : []),
     ...(hints !== undefined && discoveryHintLine(hints) !== undefined ? [discoveryHintLine(hints) as string] : []), "", formatTable(headings, rows),
     "", "MCP client registrations",
     mcpClients.length > 0
-      ? formatTable(["Client", "MCP", "Skill", "Config Path"], mcpClients.map((client) => [client.client, client.mcp_status, client.skill_status, client.config_path]))
+      ? formatTable(["Client", "MCP", "Skill", "Config Path"], mcpClients.map((client) => [targetDisplayId(client), client.mcp_status, client.skill_status, client.config_path]))
       : "No supported CLI client detected on this machine.",
     ...mcpWarnings.map((warning) => `Warning: ${warning}`),
     ...(staleLinks.length > 0 ? [`Warning: ${staleCliLinkWarning(staleLinks, mcpContext.platform)}`] : []),

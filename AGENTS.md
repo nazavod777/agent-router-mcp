@@ -76,6 +76,7 @@ Only when the user explicitly asked to set up or verify the orchestrator (never 
 | Update after `git pull` | Guide P8 |
 | Full verification | Guide P9 |
 | Errors, warnings, odd behavior | Guide §5 |
+| Windows issues: Codex `SANDBOX_UNAVAILABLE`, Claude `readonly` auth forwarding, T3 Code `antigravity:t3:<id>` profiles | Guide §3 (isolated hosts) and §5 |
 | Valid enum values / required fields | Guide §6 |
 
 ## Branch B: contributor rules

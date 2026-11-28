@@ -1,9 +1,11 @@
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import type { HarnessConfig } from "../config/schema.js";
 import { redactSecrets } from "../logging.js";
 import { ProgressTracker } from "../runtime/checkpoint.js";
+import { getEnvValue } from "../runtime/guard.js";
 import { truncateUtf8 } from "../runtime/output.js";
 import type { HarnessHealth, ProgressCheckpoint, RunMode, SecurityGuarantee, UsageStats } from "../types.js";
 import { BoundedMessages, assertSandboxExtraArgs } from "./parsers.js";
@@ -49,19 +51,56 @@ const EFFORT_SYNONYMS: Record<string, string> = {
   maximum: "max",
 };
 const AGENT_MESSAGE_TYPES = new Set(["agent_message", "assistant_message"]);
-/** Sandbox and approval flags (refused in readonly mode always, in write mode unless unsandboxed writes are allowed), long and short (`-s`, `-a` also take an attached value); `-c` overrides are checked separately. */
+/** Sandbox and approval flags (refused in readonly mode always, in write mode unless unsandboxed writes are allowed), long and short (`-s`, `-a`, `-C` also take an attached value); `-c` overrides are checked separately. */
 const FORBIDDEN_SANDBOX_ARGS = new RegExp(`^(?:${[
   "--sandbox", "--dangerously-bypass-approvals-and-sandbox", "--yolo", "--full-auto", "--ask-for-approval", "--approve-for-me",
   // Extra writable directories widen the sandbox just as much as a weaker sandbox mode.
   "--add-dir",
-].join("|")})(?:=|$)|^-[sa]`);
+  // The working root is the job's cwd or worktree; a second `-C`/`--cd` would move the sandbox root out of it.
+  "--cd",
+].join("|")})(?:=|$)|^-[saC]`);
 const SANDBOX_CONFIG_KEYS = "sandbox_mode|approval_policy|sandbox_workspace_write|sandbox_permissions|default_permissions|permissions";
+/** `windows.sandbox` picks the Windows sandbox implementation; as a dotted key or inside an inline `windows = { ... }` table. */
+const WINDOWS_SANDBOX_KEY = "windows\\.sandbox";
+const WINDOWS_SANDBOX_TABLE = "windows[\"']?\\s*=\\s*\\{[^]*sandbox";
 /**
  * A `-c key=value` override of the sandbox, permission or approval setting: either the key itself (optionally nested under
  * a table such as `profiles.x`), or an inline table assigned to `profile(s)` that carries one of those keys.
  */
 const FORBIDDEN_SANDBOX_CONFIG_KEY = new RegExp(
-  `^\\s*["']?(?:[\\w-]+\\.)*(?:${SANDBOX_CONFIG_KEYS})["']?\\s*[=.]|^\\s*["']?profiles?["']?\\s*=\\s*\\{[^]*(?:${SANDBOX_CONFIG_KEYS})`);
+  `^\\s*["']?(?:[\\w-]+\\.)*(?:${SANDBOX_CONFIG_KEYS}|${WINDOWS_SANDBOX_KEY})["']?\\s*[=.]` +
+  `|^\\s*["']?(?:[\\w-]+\\.)*${WINDOWS_SANDBOX_TABLE}` +
+  `|^\\s*["']?profiles?["']?\\s*=\\s*\\{[^]*(?:${SANDBOX_CONFIG_KEYS}|windows[^]*sandbox)`);
+const SANDBOX_CONFIG_KEY_SET: ReadonlySet<string> = new Set(SANDBOX_CONFIG_KEYS.split("|"));
+const PROFILE_TABLE_NAMES: ReadonlySet<string> = new Set(["profiles", "profile"]);
+
+/** True when a parsed TOML table sets a sandbox, permission or approval key, or `windows.sandbox`, directly in it. */
+function tableSetsSandboxKey(table: Record<string, unknown>): boolean {
+  if (Object.keys(table).some((key) => SANDBOX_CONFIG_KEY_SET.has(key))) return true;
+  const windows = table.windows;
+  return typeof windows === "object" && windows !== null && !Array.isArray(windows) && "sandbox" in windows;
+}
+
+/**
+ * True when a `-c` override (`key=value`, parsed as TOML so dotted, quoted and inline-table spellings all normalize to the
+ * same key path) assigns a sandbox or permission setting at the top level or under any `profiles.<name>` / `profile.<name>`.
+ * A value that is not valid TOML (Codex also accepts a bare word such as `sandbox_mode=danger-full-access`) falls back to
+ * the textual check, which every override passes through first.
+ */
+export function isForbiddenSandboxConfigOverride(value: string): boolean {
+  if (FORBIDDEN_SANDBOX_CONFIG_KEY.test(value)) return true;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parseToml(value) as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+  if (tableSetsSandboxKey(parsed)) return true;
+  const isTable = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+  return Object.entries(parsed).some(([name, table]) => PROFILE_TABLE_NAMES.has(name) && isTable(table)
+    && (tableSetsSandboxKey(table) || Object.values(table).some((profile) => isTable(profile) && tableSetsSandboxKey(profile))));
+}
+
 /** The Codex config is a small TOML file; anything bigger is not read. */
 const MAX_CODEX_CONFIG_BYTES = 1024 * 1024;
 const MAX_DISABLED_MCP_SERVERS = 64;
@@ -163,7 +202,8 @@ class CodexStreamParser implements AdapterStreamParser {
         const text = item ? asString(item.text) : undefined;
         if (itemType && AGENT_MESSAGE_TYPES.has(itemType) && text) {
           // Kept as the answer fallback when the -o file is empty or missing; bounded like every parser buffer.
-          this.lastAgentMessage = truncateUtf8(text, PARSER_BUFFER_LIMIT_BYTES).text;
+          // Redacted before it is cut, so a secret straddling the cut cannot leave a recognizable prefix behind.
+          this.lastAgentMessage = truncateUtf8(redactSecrets(text), PARSER_BUFFER_LIMIT_BYTES).text;
           this.tracker.appendText(text);
           this.tracker.noteTurn();
         } else {
@@ -230,7 +270,7 @@ class CodexStreamParser implements AdapterStreamParser {
 
     if (fatalErrors.length > 0) {
       if (this.terminalErrors.length > 0 && transient.length > 0) {
-        warnings.push(`Codex reported earlier transient error(s): ${truncateUtf8(transient.join("; "), MAX_TRANSIENT_WARNING_BYTES).text}`);
+        warnings.push(`Codex reported earlier transient error(s): ${truncateUtf8(redactSecrets(transient.join("; ")), MAX_TRANSIENT_WARNING_BYTES).text}`);
       }
       return classifiedFailure(LABEL, input, fatalErrors.join("\n"), "NON_ZERO_EXIT", {
         usage: this.usage,
@@ -262,7 +302,57 @@ class CodexStreamParser implements AdapterStreamParser {
 
 /** Where Codex keeps its user config: `$CODEX_HOME/config.toml`, by default `~/.codex/config.toml`. */
 function codexConfigPath(env: NodeJS.ProcessEnv): string {
-  return join(env.CODEX_HOME || join(homedir(), ".codex"), "config.toml");
+  return join(getEnvValue(env, "CODEX_HOME") || join(homedir(), ".codex"), "config.toml");
+}
+
+/** A working directory longer than this risks Windows path-length failures inside the Codex sandbox setup. */
+const MAX_SAFE_WINDOWS_CWD_CHARS = 240;
+
+/** Lower-cased, backslash-separated, without trailing separators: enough to compare two Windows paths by prefix. */
+function comparableWindowsPath(path: string, platform: NodeJS.Platform): string {
+  let resolved = path;
+  // Expand Windows 8.3 short names (e.g. RUNNER~1 -> runneradmin) when running on real Windows so TEMP under USERPROFILE matches.
+  if (platform === "win32" && process.platform === "win32") {
+    try {
+      resolved = realpathSync.native(path);
+    } catch {
+      resolved = path;
+    }
+  }
+  return resolved.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+}
+
+/**
+ * Non-secret warnings about Windows conditions in which the Codex sandbox setup is known to fail (UNC or OneDrive working
+ * directory, a very long path, TEMP/TMP outside the user profile). Empty on other platforms. Paths are never echoed.
+ */
+export function codexWindowsWarnings(
+  cwd: string, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform,
+): string[] {
+  if (platform !== "win32") return [];
+  const warnings: string[] = [];
+  if (cwd.startsWith("\\\\") || cwd.startsWith("//")) {
+    warnings.push("The working directory is a UNC (network share) path; the Codex Windows sandbox may fail to set up there. Use a local path.");
+  }
+  if (cwd.split(/[\\/]/).some((segment) => /onedrive/i.test(segment))) {
+    warnings.push("The working directory is inside OneDrive; synced folders can make the Codex Windows sandbox ACL setup fail. Use a local non-synced path.");
+  }
+  if (cwd.length > MAX_SAFE_WINDOWS_CWD_CHARS) {
+    warnings.push(`The working directory path is ${cwd.length} characters long (over ${MAX_SAFE_WINDOWS_CWD_CHARS}); the Codex Windows sandbox may fail. Use a shorter path.`);
+  }
+  const profile = getEnvValue(env, "USERPROFILE", platform)?.trim();
+  if (profile) {
+    const root = comparableWindowsPath(profile, platform);
+    for (const name of ["TEMP", "TMP"]) {
+      const value = getEnvValue(env, name, platform)?.trim();
+      if (!value) continue;
+      const temp = comparableWindowsPath(value, platform);
+      if (temp !== root && !temp.startsWith(`${root}\\`)) {
+        warnings.push(`${name} is outside the user profile (USERPROFILE); the Codex Windows sandbox may fail to create its temporary files. Point ${name} under USERPROFILE.`);
+      }
+    }
+  }
+  return warnings;
 }
 
 /**
@@ -397,7 +487,7 @@ export class CodexAdapter implements CliAdapter {
       allowUnsandboxedWrite: input.allowUnsandboxedWrite,
       readonlyForbidden: FORBIDDEN_SANDBOX_ARGS,
       writeForbidden: FORBIDDEN_SANDBOX_ARGS,
-      forbiddenConfigKey: FORBIDDEN_SANDBOX_CONFIG_KEY,
+      forbiddenConfigKey: isForbiddenSandboxConfigOverride,
     });
     const launch = requireLaunch(input.harness.binary);
     // Pre-create the -o file with 0600 so Codex overwrites it without widening permissions.
@@ -417,9 +507,9 @@ export class CodexAdapter implements CliAdapter {
       ...(isExplicitEffort(nativeEffort) ? ["-c", `model_reasoning_effort=${JSON.stringify(nativeEffort)}`] : []),
       "-o", outputFile,
     );
-    const warnings: string[] = [];
+    const warnings: string[] = codexWindowsWarnings(input.cwd, input.env ?? process.env);
     if (!input.inheritMcp) {
-      args.push("-c", disabledMcpServersOverride(await readConfiguredMcpServerNames()));
+      args.push("-c", disabledMcpServersOverride(await readConfiguredMcpServerNames(input.env)));
     }
     if (!input.isGitRepo) args.push("--skip-git-repo-check");
     if (input.systemContext) args.push("-c", `developer_instructions=${JSON.stringify(input.systemContext)}`);

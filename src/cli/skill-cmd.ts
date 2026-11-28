@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { canonicalPath } from "./atomic-file.js";
 import {
-  CLIENTS, CLIENT_IDS, createInstallContext, detectClient, inspectMcp, parseTargetList, targetUsage,
-  type ClientId, type InstallContext,
+  assertInstanceSkillWritable, createInstallContext, fixTargetId, inspectMcp, parseTargetList, resolveTargets, targetUsage,
+  type ClientTarget, type InstallContext,
 } from "./mcp-install.js";
 import { CLI_NAME } from "./name.js";
 import { installSkillDir } from "./skill-install.js";
@@ -15,39 +15,29 @@ function usage(): string {
 }
 
 interface SkillTarget {
-  client?: ClientId;
+  /** The resolved client location; absent for `--dir`. */
+  client?: ClientTarget;
   skillDir: string;
 }
 
-/** `all` = the core CLIs plus every other CLI detected on this machine. */
-async function allTargets(ctx: InstallContext): Promise<SkillTarget[]> {
-  const targets: SkillTarget[] = [];
-  for (const id of CLIENT_IDS) {
-    const spec = CLIENTS[id];
-    if (spec.core || (await detectClient(spec, ctx)).detected) targets.push({ client: id, skillDir: spec.layout(ctx).skillDir });
-  }
-  return targets;
-}
-
+/** `all` = the core CLIs plus every other CLI detected on this machine (and every instance); `antigravity` also brings its instances. */
 async function selectTargets(values: { target?: string[]; dir?: string }, ctx: InstallContext): Promise<SkillTarget[]> {
   if (values.dir !== undefined) {
     if (values.dir.trim() === "") throw new Error("--dir must not be empty.");
     if (values.target !== undefined) throw new Error("--dir cannot be combined with --target.");
     return [{ skillDir: resolve(ctx.cwd, values.dir, "orchestrate") }];
   }
-  const requested = parseTargetList(values.target);
-  const unknown = requested.filter((value) => value !== "all" && !Object.hasOwn(CLIENTS, value));
-  if (unknown.length > 0) throw new Error(`Unknown target ${unknown.map((value) => JSON.stringify(value)).join(", ")}. ${usage()}`);
-  if (requested.includes("all")) return allTargets(ctx);
-  return requested.map((id) => ({ client: id as ClientId, skillDir: CLIENTS[id as ClientId].layout(ctx).skillDir }));
+  const { targets } = await resolveTargets(ctx, parseTargetList(values.target), { alwaysInclude: (spec) => spec.core });
+  return targets.map((target) => ({ client: target, skillDir: target.layout.skillDir }));
 }
 
-/** Drops targets whose real directory was already seen (for example two symlinks to one skills folder). */
-async function dedupe(targets: SkillTarget[]): Promise<SkillTarget[]> {
+/** Drops targets whose real directory was already seen (for example two symlinks to one skills folder); Windows paths compare case-insensitively. */
+async function dedupe(targets: SkillTarget[], ctx: InstallContext): Promise<SkillTarget[]> {
   const seen = new Set<string>();
   const unique: SkillTarget[] = [];
   for (const target of targets) {
-    const key = await canonicalPath(target.skillDir);
+    const real = await canonicalPath(target.skillDir);
+    const key = ctx.platform === "win32" ? real.toLowerCase() : real;
     if (seen.has(key)) continue;
     seen.add(key);
     unique.push(target);
@@ -56,11 +46,12 @@ async function dedupe(targets: SkillTarget[]): Promise<SkillTarget[]> {
 }
 
 /** One line per client that now has the skill but no working MCP registration. */
-async function driftNotes(clients: ClientId[], ctx: InstallContext): Promise<string[]> {
+async function driftNotes(clients: ClientTarget[], ctx: InstallContext): Promise<string[]> {
   const notes: string[] = [];
-  for (const id of clients) {
-    const { status } = await inspectMcp(CLIENTS[id], ctx);
+  for (const client of clients) {
+    const { status } = await inspectMcp(client, ctx);
     if (status === "current") continue;
+    const id = await fixTargetId(client, ctx);
     const fix = status === "missing" || status === "stale"
       ? `Run: ${CLI_NAME} mcp install --target ${id}  (or: ${CLI_NAME} setup --target ${id})`
       : `Run: ${CLI_NAME} mcp status --target ${id}`;
@@ -75,16 +66,17 @@ async function runInstall(args: string[], io: CliIo, ctx: InstallContext): Promi
     io.out(usage());
     return 0;
   }
-  const targets = await dedupe(await selectTargets(values, ctx));
+  const targets = await dedupe(await selectTargets(values, ctx), ctx);
   let failed = false;
-  const installedClients: ClientId[] = [];
+  const installedClients: ClientTarget[] = [];
   for (const target of targets) {
     try {
+      if (target.client) assertInstanceSkillWritable(target.client, ctx);
       io.out((await installSkillDir(target.skillDir, ctx.skillSourcePath, false)).path);
       if (target.client) installedClients.push(target.client);
     } catch (error) {
       failed = true;
-      io.err(`${CLI_NAME}: ${target.client ?? "skill"}: ${error instanceof Error ? error.message : String(error)}`);
+      io.err(`${CLI_NAME}: ${target.client?.targetId ?? "skill"}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   for (const note of await driftNotes(installedClients, ctx)) io.err(note);

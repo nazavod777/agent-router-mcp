@@ -4,7 +4,7 @@ import { delimiter, join } from "node:path";
 
 /** Environment variables that move a CLI's own configuration; tests point them at an empty directory. */
 const CLI_HOME_VARIABLES = [
-  "CODEX_HOME", "DSH_HOME", "COPILOT_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT",
+  "CODEX_HOME", "DSH_HOME", "COPILOT_HOME", "CLAUDE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT",
 ] as const;
 
 const FX_STUB = `#!/bin/sh
@@ -52,21 +52,33 @@ export function installStubClis(names: readonly string[], stubs: Record<string, 
   const emptyHome = join(root, "home");
   mkdirSync(binDir, { recursive: true });
   mkdirSync(emptyHome, { recursive: true });
+  const isWindows = process.platform === "win32";
   for (const name of names) {
     const path = join(binDir, name);
     writeFileSync(path, stubs[name] ?? (name === "fx" ? FX_STUB : DEFAULT_STUB), { mode: 0o755 });
     chmodSync(path, 0o755);
+    if (isWindows) {
+      const scriptName = `_stub_${name}.cjs`;
+      const scriptBody = name === "fx"
+        ? 'if (process.argv[2] === "--help") console.log("Usage: fx ask | fx acp");\nprocess.exit(0);\n'
+        : 'if (process.argv[2] === "--version") console.log("1.0.0");\nprocess.exit(0);\n';
+      writeFileSync(join(binDir, scriptName), scriptBody, "utf8");
+      writeFileSync(join(binDir, `${name}.cmd`), `@ECHO off\r\nnode "%~dp0\\${scriptName}" %*\r\n`, "utf8");
+    }
   }
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${binDir}${delimiter}${previousPath ?? ""}`;
+  const pathKey = isWindows
+    ? Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ?? "PATH"
+    : "PATH";
+  const previousPath = process.env[pathKey];
+  process.env[pathKey] = `${binDir}${delimiter}${previousPath ?? ""}`;
   const restoreHomes = isolateCliHomes(emptyHome);
   return {
     binDir,
     emptyHome,
     restore() {
       restoreHomes();
-      if (previousPath === undefined) delete process.env.PATH;
-      else process.env.PATH = previousPath;
+      if (previousPath === undefined) delete process.env[pathKey];
+      else process.env[pathKey] = previousPath;
       rmSync(root, { recursive: true, force: true });
     },
   };

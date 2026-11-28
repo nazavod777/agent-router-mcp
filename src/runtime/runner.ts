@@ -8,11 +8,12 @@ import { StringDecoder } from "node:string_decoder";
 import type {
   AdapterStreamParser, AdapterRegistryLike, BuiltInvocation, CliAdapter, NativeSubagentsControl, ParsedAdapterResult,
 } from "../adapters/types.js";
+import { assertCommandLineFits } from "../adapters/parsers.js";
 import { discoverCliLimits, type CliLimitDiscoveryOptions } from "../config/cli-limits.js";
 import { getWorktreesDir } from "../config/paths.js";
 import { resolveModelAlias, type ConfigManager, type ConfigSnapshot } from "../config/resolver.js";
 import type { DefaultsConfig, HarnessConfig, ModelConfig } from "../config/schema.js";
-import { logger, redactSecrets } from "../logging.js";
+import { logger, redactSecrets, registerSecretValues } from "../logging.js";
 import { invalidInputError } from "../mcp/input.js";
 import type {
   ErrorCode, FailureScope, HarnessConcurrencyInfo, IsolationMode, JobProgressSummary, JobRecord, JobTimeoutInfo, ProgressCheckpoint,
@@ -20,7 +21,7 @@ import type {
 } from "../types.js";
 import {
   allowedRootsFromEnv, buildChildEnv, checkRecursionLimit, getCurrentOrchDepth, IGNORE_SUBMODULES, isInsidePath, revalidateCwd, runFilterFreeGit,
-  validateCwd, type ValidatedCwd,
+  deleteEnvValue, getEnvValue, setEnvValue, validateCwd, type ValidatedCwd,
 } from "./guard.js";
 import { formatCheckpointForHandoff, MAX_DIFF_EXCERPT_BYTES, neutralizeTags, sanitizeCheckpoint } from "./checkpoint.js";
 import {
@@ -116,6 +117,7 @@ export interface RuntimeDegradation {
 const COOLDOWNS: Partial<Record<ErrorCode, number>> = {
   AUTH_REQUIRED: 600_000, CLI_NOT_FOUND: 600_000, QUOTA_EXCEEDED: 600_000, MODEL_UNSUPPORTED: 600_000,
   RATE_LIMITED: 120_000, PROVIDER_OVERLOADED: 120_000,
+  SANDBOX_UNAVAILABLE: 600_000,
 };
 
 export function defaultFailureScope(code: ErrorCode): FailureScope {
@@ -358,6 +360,8 @@ export interface RunnerOptions {
   cliLimits?: Omit<CliLimitDiscoveryOptions, "env" | "cwd">;
   /** Most jobs the host keeps waiting at once, whatever `max_queue_size` allows per session; default 256. */
   maxTotalQueued?: number;
+  /** Test seam: platform whose command-line length limit is enforced before a CLI starts; defaults to the running one. */
+  platform?: NodeJS.Platform;
 }
 
 interface Execution {
@@ -414,8 +418,12 @@ interface JobState {
   stop?: StructuredError;
   finishing?: boolean;
   child?: ChildProcessWithoutNullStreams;
+  /** `Date.now()` right before the CLI was spawned; lets Windows process-tree cleanup tell its descendants from reused PIDs. */
+  spawnedAt?: number;
   termination?: Promise<void>;
   terminationError?: string;
+  /** The process tree could not be inspected after a clean exit; reported, but it does not poison later shared writes. */
+  terminationWarning?: string;
   /** Aborted as soon as `stop` is set, so worktree and CLI setup (lock waits, Git, adapter work) end promptly. */
   abort: AbortController;
   /** A worktree this job created: reserved in `activeWorktrees` before it exists, released once its diff is collected. */
@@ -763,6 +771,48 @@ function getSecrets(env: NodeJS.ProcessEnv): string[] {
   );
 }
 
+/** Orchestration variables the runner owns; an adapter's `envOverrides` can never replace them. */
+const RESERVED_CHILD_ENV = ["ORCH_DEPTH", "ORCH_JOB_ID", "ORCH_JOB_CHAIN", "ORCH_MAX_DEPTH"] as const;
+
+/**
+ * The environment the CLI is spawned with: the base child environment plus the adapter's overrides. Names match
+ * case-insensitively on Windows (an override of `Path` replaces `PATH`), and the reserved orchestration variables keep
+ * the base values.
+ */
+export function applyEnvOverrides(
+  baseEnv: NodeJS.ProcessEnv, overrides: Record<string, string> | undefined, platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...baseEnv };
+  for (const [name, value] of Object.entries(overrides ?? {})) setEnvValue(env, name, value, platform);
+  for (const name of RESERVED_CHILD_ENV) {
+    const value = getEnvValue(baseEnv, name, platform);
+    if (value !== undefined) setEnvValue(env, name, value, platform);
+    else deleteEnvValue(env, name, platform);
+  }
+  return env;
+}
+
+/** Applies the job's secrets to every free-text field of an adapter result. */
+export function redactParsedResult(parsed: ParsedAdapterResult, extraSecrets: readonly string[]): ParsedAdapterResult {
+  if (extraSecrets.length === 0) return parsed;
+  const secrets = [...extraSecrets];
+  const redact = (text: string): string => redactSecrets(text, secrets);
+  const error = parsed.error;
+  return {
+    ...parsed,
+    summary: redact(parsed.summary),
+    ...(parsed.warnings ? { warnings: parsed.warnings.map(redact) } : {}),
+    ...(error ? {
+      error: {
+        ...error,
+        message: redact(error.message),
+        ...(error.raw_error !== undefined ? { raw_error: redact(error.raw_error) } : {}),
+        ...(error.stderr_tail !== undefined ? { stderr_tail: redact(error.stderr_tail) } : {}),
+      },
+    } : {}),
+  };
+}
+
 class LineBuffer {
   private chunks: Buffer[] = [];
   private size = 0;
@@ -926,9 +976,12 @@ export async function consumeLog(
     if (chunks.length > 0 || (everything && carry)) {
       const pending = carry + Buffer.concat(chunks).toString("utf8");
       chunks.length = 0;
-      const cut = everything ? pending.length : safeFlushLength(pending, extraSecrets);
-      carry = pending.slice(cut);
-      if (cut > 0) await writer.append(Buffer.from(redactSecrets(pending.slice(0, cut), extraSecrets)));
+      // Redacted as a whole first: a secret whose own suffix equals its prefix would otherwise be cut by the hold-back
+      // below and written in two unrecognizable halves.
+      const redacted = redactSecrets(pending, extraSecrets);
+      const cut = everything ? redacted.length : safeFlushLength(redacted, extraSecrets);
+      carry = redacted.slice(cut);
+      if (cut > 0) await writer.append(Buffer.from(redacted.slice(0, cut)));
     }
     if (oversized) await writer.markTruncated();
   }
@@ -2106,11 +2159,20 @@ export class OrchestratorRunner<Plan extends StoredPlan = StoredPlan> {
   private stopChild(state: JobState): void {
     const pid = state.child?.pid;
     if (!pid || state.termination) return;
+    const child = state.child;
+    const rootExited = child !== undefined && (child.exitCode !== null || child.signalCode !== null);
+    // The CLI ended by itself and successfully, and nobody stopped it: nothing suggests a child is still running.
+    const cleanSelfExit = rootExited && !state.stop && child.exitCode === 0;
     state.termination = terminateProcessTree({
-      pid, jobId: state.record.job_id, graceMs: this.options.terminateGraceMs,
+      pid, jobId: state.record.job_id, graceMs: this.options.terminateGraceMs, spawnedAt: state.spawnedAt, rootExited,
     }).then((result) => {
+      if (result.terminated) return;
+      const reason = result.reason ?? "The process tree could not be confirmed ended.";
+      // A restricted PowerShell/WMI must not lock every later shared write out after a job that finished cleanly; a
+      // timeout, cancellation or failed run keeps the strict rule, because then children may well be running.
+      if (result.processTableUnavailable && cleanSelfExit) state.terminationWarning = reason;
       // A tree that could not be confirmed ended counts like a failed termination: children may still be writing.
-      if (!result.terminated) state.terminationError = result.reason ?? "The process tree could not be confirmed ended.";
+      else state.terminationError = reason;
     }, (error: unknown) => {
       state.terminationError = failureMessage(error);
     }).then(() => state.afterTermination?.());
@@ -2196,6 +2258,10 @@ export class OrchestratorRunner<Plan extends StoredPlan = StoredPlan> {
           warnings.push(`Prior job ${state.record.continued_from} is no longer available; running without handoff.`);
         }
       }
+      // One snapshot for the adapter and the child: both see the same variables (the adapter's own overrides come after).
+      const baseChildEnv = buildChildEnv({
+        baseEnv: env, nextDepth: getCurrentOrchDepth(env) + 1, jobId: state.record.job_id, maxDepth: defaults.orch_max_depth,
+      });
       if (!state.stop) {
         invocation = await raceAbort(adapter.buildInvocation({
           harnessId: state.record.harness,
@@ -2207,21 +2273,25 @@ export class OrchestratorRunner<Plan extends StoredPlan = StoredPlan> {
           prompt: request.prompt,
           systemContext,
           cwd: effectiveCwd,
+          sourceCwd: state.record.cwd,
           jobDir: state.record.log_path,
           inheritMcp: request.inherit_mcp ?? execution.harness.inherit_mcp ?? defaults.inherit_mcp,
           allowUnsandboxedWrite: defaults.allow_unsandboxed_write,
           isGitRepo: cwd.isGitRepo,
           nativeSubagents: execution.nativeSubagents,
           signal: state.abort.signal,
+          env: baseChildEnv,
         }), state.abort.signal, removeAdapterTempFiles);
         warnings.push(...invocation.warnings);
       }
       if (!state.stop && invocation) {
-        const childEnv = buildChildEnv({
-          baseEnv: env, nextDepth: getCurrentOrchDepth(env) + 1, jobId: state.record.job_id, extra: invocation.envOverrides,
-          maxDepth: defaults.orch_max_depth,
-        });
-        extraSecrets = [...new Set([...extraSecrets, ...getSecrets(childEnv)])];
+        const childEnv = applyEnvOverrides(baseChildEnv, invocation.envOverrides);
+        const adapterSecrets = invocation.secrets ?? [];
+        // Registered process-wide too, so redactSecrets() calls inside adapters mask the same values.
+        registerSecretValues(adapterSecrets);
+        extraSecrets = [...new Set([...extraSecrets, ...adapterSecrets, ...getSecrets(childEnv)])];
+        // Every job secret is registered before the child runs, so streaming parsers redact it before any truncation.
+        registerSecretValues(extraSecrets);
         tail = new StderrTail(extraSecrets);
         streamParser = adapter.createStreamParser();
         ({ parsed, exitCode } = await this.invoke(
@@ -2249,6 +2319,7 @@ export class OrchestratorRunner<Plan extends StoredPlan = StoredPlan> {
     }
 
     if (state.terminationError) warnings.push(`Could not terminate the process tree: ${state.terminationError}`);
+    else if (state.terminationWarning) warnings.push(`Could not verify that the process tree ended after a clean exit: ${state.terminationWarning}`);
     const extensionsUsed = deadline.progress().extensionsUsed;
     if (extensionsUsed > MAX_EXTENSION_WARNINGS) {
       warnings.push(`The soft timeout was extended ${extensionsUsed} times in total while the job kept making progress.`);
@@ -2417,6 +2488,8 @@ export class OrchestratorRunner<Plan extends StoredPlan = StoredPlan> {
     cwd: string, worktree: WorktreeInfo | undefined, defaults: DefaultsConfig, extraSecrets: string[], tail: StderrTail,
   ): Promise<{ parsed: ParsedAdapterResult; exitCode: number | null }> {
     const jobId = state.record.job_id;
+    // The expanded command line (launcher, its prefix arguments and the CLI arguments) is final here, for every driver.
+    assertCommandLineFits(`Harness ${state.record.harness}`, invocation.command, invocation.args, this.options.platform);
     const budget = new LogBudget(defaults.max_log_bytes_per_job);
     const stdout = await this.store.openLog(jobId, "stdout", budget);
     let stderr: BoundedLogWriter | undefined;
@@ -2431,6 +2504,7 @@ export class OrchestratorRunner<Plan extends StoredPlan = StoredPlan> {
       if (state.stop) throw state.stop;
       await this.revalidateBeforeSpawn(state, cwd, worktree);
       if (state.stop) throw state.stop;
+      state.spawnedAt = Date.now();
       const child = spawnDetached(invocation.command, invocation.args, { cwd, env });
       state.child = child;
       const outputMode = invocation.outputMode ?? "buffered";
@@ -2551,9 +2625,13 @@ export class OrchestratorRunner<Plan extends StoredPlan = StoredPlan> {
         : undefined;
       const droppedTrailingOutput = [stdoutResult, stderrResult].some((settled) => settled.status === "fulfilled" && settled.value);
       try {
-        const parsed = parser.finish({
+        const finished = parser.finish({
           ...exit.value, stderrTail: tail.text(), outputFileContent, stdoutTruncated: stdout.truncated, oversizedLinesDropped,
+          extraSecrets,
         });
+        // The process-wide secret registry is bounded (oldest values are evicted under load), so this job's own secrets
+        // are applied once more to everything an adapter produced.
+        const parsed = redactParsedResult(finished, extraSecrets);
         return {
           exitCode: exit.value.exitCode,
           parsed: droppedTrailingOutput
@@ -2606,9 +2684,11 @@ export class OrchestratorRunner<Plan extends StoredPlan = StoredPlan> {
     if (!before || !root) return false;
     const providerRejection = COOLDOWNS[error.code] !== undefined || error.code === "PROMPT_TOO_LARGE";
     if (!providerRejection) return false;
-    // Any assistant output means tools may already have touched git-ignored files.
+    // A sandbox that never started ran no tool at all (zero tool calls was checked above), so any text the CLI printed is its
+    // diagnostic, not work; only an unchanged tree decides. Any other provider rejection with assistant output means tools
+    // may already have touched git-ignored files.
     const producedOutput = (job.result?.usage?.output_tokens ?? 0) > 0 || Boolean(job.result?.summary?.trim());
-    if (producedOutput) return false;
+    if (producedOutput && error.code !== "SANDBOX_UNAVAILABLE") return false;
     const after = await treeFingerprint(job.effective_cwd, root, job.job_id);
     return Boolean(after && before.digest === after.digest);
   }

@@ -42,7 +42,7 @@
 | 🧠 **反炒作默认目录** | 12 家实验室 43 款模型、23 个角色、8 套预设，写明真实短板、跨厂商评审机制、未安装 CLI 自动回退并避开 `max` 陷阱 |
 | 🎛️ **Technical Ledger 本地设置界面** | 零依赖本地 Web 编辑器（`agrmcp settings`），提供运维表格、实时 harness 健康状态与委派就绪情况、主从详情预设矩阵、完整 `[defaults]` 编辑器、模型发现审查抽屉、感知驱动的 harness 与模型字段、自定义主题下拉菜单、带状态的常驻保存栏、保存规则提示、favicon 图标、`/` 搜索及严格的离线 nonce CSP |
 | 🛡️ **受控安全执行** | 纯 argv 启动（无 shell）、`ORCH_DEPTH` 防递归、二进制身份校验（`fx`/`agent`）、严格 `readonly` 校验、进程组与孙进程回收、密钥脱敏以及输出上限保护 |
-| 🧪 **全离线测试套件** | 47 个测试文件共 2,150 项测试，覆盖全部 17 个驱动、模拟 CLI 集成、`agrmcp setup` / `agrmcp mcp` 配置编辑器、按会话并发与基于活动的超时、Web UI 安全、目录字节预算、文档 TOML 示例、`agrmcp wait`、CLI 限制发现、模型发现、配置隔离、检查点、宽松的 MCP 入参校验与真实 `stdio` MCP 冒烟检查 |
+| 🧪 **全离线测试套件** | 52 个测试文件共 2,685 项测试，覆盖全部 17 个驱动、Windows 进程树 / 沙箱 / 环境变量大小写 / T3 Code 配置档案、模拟 CLI 集成、`agrmcp setup` / `agrmcp mcp` 配置编辑器、按会话并发与基于活动的超时、Web UI 安全、目录字节预算、文档 TOML 示例、`agrmcp wait`、CLI 限制发现、模型发现、配置隔离、检查点、宽松的 MCP 入参校验与真实 `stdio` MCP 冒烟检查 |
 
 ## 🎯 解决什么问题
 
@@ -116,7 +116,8 @@ codex mcp add orchestrator -- "$(command -v node)" "/abs/path/to/agent-router-mc
 <tr><td width="260"><img src="assets/c-antigravity.svg" height="20" align="absmiddle" alt="Antigravity"> <img src="assets/c-gemini.svg" height="20" align="absmiddle" alt="Gemini"><br><sub>手动：Antigravity 或 Gemini CLI（<code>--scope user</code> = 所有项目）</sub></td><td>
 
 ```bash
-# Antigravity 读取 ~/.gemini/config/mcp_config.json（旧路径：~/.gemini/antigravity/mcp_config.json）
+# Antigravity 读取 ~/.gemini/config/mcp_config.json（旧路径：~/.gemini/antigravity/mcp_config.json；GEMINI_HOME 可覆盖 ~/.gemini）
+# `agrmcp setup` 还会发现 T3 Code 隔离配置档案（antigravity:t3:<id>）；--target antigravity:primary 仅修复主配置
 agy mcp add orchestrator -- "$(command -v node)" "/abs/path/to/agent-router-mcp/dist/cli/main.js" mcp
 gemini mcp add --scope user orchestrator "$(command -v node)" "/abs/path/to/agent-router-mcp/dist/cli/main.js" mcp
 ```
@@ -421,7 +422,7 @@ agrmcp models discover --apply --all-new --revision <rev>   # 所有新模型，
 
 - 🔁 **防递归调用：** 子进程继承 `ORCH_DEPTH` 与 `ORCH_JOB_ID`；超过 `orch_max_depth`（默认 `1`）立即返回 `RECURSION_BLOCKED`。
 - 🪪 **二进制身份与参数校验：** 探测时区分 Vercel `fx` 与 `antonmedv/fx` JSON 查看器，并对 Cursor 的 `agent` 校验版本格式；基于 argv 的驱动强制执行 100 KiB 提示上限（`PROMPT_TOO_LARGE`）并拒绝会削弱 `readonly` 的 `extra_args`（`SANDBOX_POLICY_VIOLATION`）。
-- ⚙️ **进程树清理：** 所有 CLI 均通过 argv 直接启动（不经由 shell）并置于独立进程组。在 POSIX 上，取消、超时或正常退出时向整组发送 `SIGTERM` → `SIGKILL`；Linux 还会通过 `/proc` 按 `ORCH_JOB_ID` / `ORCH_JOB_CHAIN` 回收脱离的孙进程，macOS 依赖 POSIX 进程组。Windows 使用 `taskkill /T`（随后 `/T /F`，`taskkill` 不可用时回退到 `process.kill(pid)`），而不是进程组。
+- ⚙️ **进程树清理：** 所有 CLI 均通过 argv 直接启动（不经由 shell）并置于独立进程组。在 POSIX 上，取消、超时或正常退出时向整组发送 `SIGTERM` → `SIGKILL`；Linux 还会通过 `/proc` 按 `ORCH_JOB_ID` / `ORCH_JOB_CHAIN` 回收脱离的孙进程，macOS 依赖 POSIX 进程组。在 Windows 上，CLI 以隐藏的无头方式启动（`windowsHide: true`，不再闪现 `detached` 控制台），终止使用 `taskkill /T`（随后 `/T /F`，`taskkill` 不可用时回退到 `process.kill(pid)`），并通过 Windows 进程表校验后代进程已退出，而不是进程组。Windows 上的 Codex 若无法启动其操作系统沙箱，则返回 `SANDBOX_UNAVAILABLE`；沙箱参数绝不会被放宽。
 - 🌿 **路径与计划约束：** worktree 全部位于 `ORCH_STATE_DIR` 内；工作目录受 `ORCH_ALLOWED_ROOTS` 校验；启用 `require_plan_id`（默认 `false`）后会严格核对执行参数与配置版本是否匹配有效的 `orch_plan_preview` 行。
 - 🌐 **加固的本机 Web UI：** 仅绑定 `127.0.0.1` 随机端口并严格校验 `Host`（防 DNS rebinding）；一次性 URL 令牌（启动后 5 分钟内有效）换取 `HttpOnly; SameSite=Strict` cookie；仅通过一次性重定向 URL 片段（`/#t=<token>`，不会经 HTTP 发送，也绝不出现在返回的 HTML 中）把与源（origin）绑定的 `X-Orch-Token` 交给页面（页面将其存入按 origin 与端口隔离的 `sessionStorage`，并立即清除地址栏中的片段），并要求**每一次** `/api/*` 调用都同时携带它与 cookie，包括 `GET /api/state` 与 `/api/health` 等读取请求；拒绝 `Sec-Fetch-Site` 不是 `same-origin` 的任何浏览器请求；写操作还会校验精确 `Origin` + `Content-Type: application/json` + 256 KiB 请求体上限，并配合 nonce CSP 与无 CORS；空闲 15 分钟自动关闭（页面打开时每分钟心跳保活）。
 - 🕶️ **密钥脱敏：** 名称含 `KEY`、`TOKEN`、`SECRET`、`PASSWORD` 或 `CREDENTIAL` 的环境变量值，以及 `Bearer` 令牌和 `Authorization` 头，均会从日志、摘要、diff 与错误中清除；对环境变量值的字面脱敏只匹配长度至少为 8 个字符的密钥值。用户配置、临时提示文件与备份均以 `0600` 权限写入。
@@ -447,7 +448,7 @@ agrmcp models discover --apply --all-new --revision <rev>   # 所有新模型，
 - 📏 **argv 提示词长度限制：** 仅支持通过 argv 传入提示词的 CLI（`antigravity`、`cursor`、`grok`、`kiro`、`fx`、`copilot`、`kimi`、`vibe`）强制执行 100 KiB 上限（`PROMPT_TOO_LARGE`），以避免触发 Linux `MAX_ARG_STRLEN`；超长提示词请选用 stdin/文件驱动（`claude`、`codex`、`dsh`、`pi`、`opencode`、`gemini`、`qwen`、`muse`、`droid`）。
 - 🔁 **故障转移的边界：** 冷却只在当前 MCP 服务器会话内有效；无法分类的失败以 `NON_ZERO_EXIT` / `PARSE_ERROR` 返回并附原样 `raw_error`，由智能体判断。若所有 harness 都失败，则适用 HARD STOP 规则：停止全部主要工作，保留未提交的改动与 worktree，并向用户通报每个被阻塞的 harness、原样错误与恢复选项。
 - <img src="assets/c-git.svg" height="20" align="absmiddle" alt="Git"> 隔离 worktree 从 `HEAD` 检出 —— 父工作区中尚未提交的改动不会复制到子 worktree。
-- <img src="assets/c-macos.svg" height="20" align="absmiddle" alt="macOS"> <img src="assets/c-windows.svg" height="20" align="absmiddle" alt="Windows"> 基于 `/proc` + `ORCH_JOB_CHAIN` 的脱离孙进程回收仅支持 Linux；macOS 依赖 POSIX 进程组，Windows 使用 `taskkill /T`（随后 `/T /F`，并回退到 `process.kill(pid)`）而不是进程组。
+- <img src="assets/c-macos.svg" height="20" align="absmiddle" alt="macOS"> <img src="assets/c-windows.svg" height="20" align="absmiddle" alt="Windows"> 基于 `/proc` + `ORCH_JOB_CHAIN` 的脱离孙进程回收仅支持 Linux；macOS 依赖 POSIX 进程组，Windows 使用 `taskkill /T`（随后 `/T /F`，并回退到 `process.kill(pid)`）加退出后后代进程校验，而不是进程组。Claude `readonly`（`--restricted`）仅从用户级 `settings.json` 转发严格白名单内的认证/端点变量（绝不读取项目文件，也不转发代理/CA/自定义请求头变量），且 `--restricted` 绝不被放宽。
 
 ## ✅ 测试状态
 
@@ -464,7 +465,7 @@ npm run build && npm run typecheck && npm test
 | 🔒 **设置界面安全** | `Host` 防重绑定、一次性令牌换 cookie、`Origin`/CSRF/`Content-Type`/体积限制、409 冲突、动态 `supported_drivers`、重置备份、模型发现预览与导入（含 409 冲突和 410 过期的恢复） |
 | 📡 **MCP stdio 冒烟** | 真实启动 JSON-RPC `stdio` 服务器、`tools/list`、17 harness 目录在 24 KB 预算内完整分页、`orch_plan_preview`、`orch_run` → `orch_status` |
 
-离线套件包含 **47 个文件中的 2,150 项测试**。
+离线套件包含 **52 个文件中的 2,685 项测试**，涵盖 Windows 进程树、沙箱、环境变量大小写与 T3 Code 配置档案。
 
 ## 🗂️ 目录结构
 
@@ -481,7 +482,7 @@ npm run build && npm run typecheck && npm test
 | <img src="assets/c-mcp.svg" height="20" align="absmiddle" alt="MCP"> | `src/mcp/` 与 `src/cli/` | `stdio` MCP 服务器、6 个工具处理器与 统一的 `agrmcp` CLI、`agrmcp setup` / `agrmcp mcp` 安装器、`agrmcp models discover`、宽松入参校验 |
 | 🎛️ | `src/settings-ui/` | 加固本地 HTTP 服务器与零依赖 HTML/JS 可视化编辑器 |
 | 🎨 | [`DESIGN.md`](DESIGN.md) | 设置界面的视觉设计规范、布局与交互约定 |
-| 🧪 | `tests/` | 47 个文件 2,150 项离线测试（单元测试、`agrmcp wait`、TOML 示例、多驱动适配、模型发现、UI 安全与 MCP 冒烟） |
+| 🧪 | `tests/` | 52 个文件 2,685 项离线测试（单元测试、`agrmcp wait`、TOML 示例、多驱动适配、模型发现、UI 安全与 MCP 冒烟） |
 | 🎨 | `assets/` | README 用的 SVG |
 | 🤖 | `AGENTS.md` | 面向 AI 编程智能体的简明说明：任务分支、硬性约束与快速操作手册 |
 | 🤖 | `CLAUDE.md` | 引导 Claude Code 读取 `AGENTS.md` |

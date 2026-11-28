@@ -1,9 +1,10 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import type { HarnessConfig } from "../config/schema.js";
 import { DRIVER_METADATA } from "../drivers.js";
+import { getEnvValue } from "../runtime/guard.js";
 import type { UsageStats } from "../types.js";
 import { assertSandboxExtraArgs, createJsonResultParser, extractClaudeLikeResult, extractContentText, isNonResultEvent, withInlineSystemContext } from "./parsers.js";
 import { adapterError, asNumber, asString, compactUsage, healthNow, isObject, probeBinaryAndVersion, requireLaunch, tryParseJson } from "./probe-utils.js";
@@ -19,15 +20,22 @@ const OFF_VALUES = new Set(["false", "0", "no", "off"]);
 
 /** A key counts only with a real value: an empty or blank string (or an "off" switch) is not a credential. */
 function hasAuthEnv(env: NodeJS.ProcessEnv, key: string): boolean {
-  const value = env[key]?.trim();
+  const value = getEnvValue(env, key)?.trim();
   if (!value) return false;
   return !(key.startsWith("GOOGLE_GENAI_USE_") && OFF_VALUES.has(value.toLowerCase()));
 }
 
-async function hasGeminiAuthSetting(): Promise<boolean> {
+/** `$GEMINI_CLI_HOME/.gemini/settings.json` (a relative home is resolved against `cwd`), else `~/.gemini/settings.json`. */
+function geminiSettingsPath(env: NodeJS.ProcessEnv, cwd: string): string {
+  const configured = getEnvValue(env, "GEMINI_CLI_HOME")?.trim();
+  const home = configured ? (isAbsolute(configured) ? configured : resolve(cwd, configured)) : homedir();
+  return join(home, ".gemini", "settings.json");
+}
+
+export async function hasGeminiAuthSetting(env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): Promise<boolean> {
   let file;
   try {
-    file = await open(join(homedir(), ".gemini", "settings.json"), constants.O_RDONLY | constants.O_NONBLOCK);
+    file = await open(geminiSettingsPath(env, cwd), constants.O_RDONLY | constants.O_NONBLOCK);
     const info = await file.stat();
     if (!info.isFile() || info.size > MAX_SETTINGS_BYTES) return false;
     const buffer = Buffer.alloc(info.size);

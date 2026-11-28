@@ -55,7 +55,17 @@ const EFFORT_SYNONYMS: Record<string, string> = {
  * A model's own `cli_provider` wins over the harness default; the probe has no model and uses the default alone.
  */
 function resolveUpstreamProvider(harness: HarnessConfig, model?: ModelConfig): string | undefined {
-  return model?.cli_provider ?? harness.default_upstream_provider;
+  return (model ? effectivePiModelProvider(model) : undefined) ?? harness.default_upstream_provider;
+}
+
+/**
+ * The provider a Pi model is routed to by its own configuration: `cli_provider`, else the prefix of a `provider/model`
+ * `cli_model` (Pi reads that prefix as the provider). Undefined means the harness default provider applies.
+ */
+export function effectivePiModelProvider(model: Pick<ModelConfig, "cli_provider" | "cli_model">): string | undefined {
+  if (model.cli_provider !== undefined) return model.cli_provider;
+  const slash = model.cli_model.indexOf("/");
+  return slash > 0 ? model.cli_model.slice(0, slash) : undefined;
 }
 
 function mapAuthCheck(stdout: string): { status: HarnessHealth["auth_status"]; note?: string } {

@@ -71,4 +71,4 @@ jobs:
       - run: npm pack --dry-run
       # Only tests that do not rely on POSIX shell-shebang fixtures run on Windows.
       - name: Cross-platform unit tests
-        run: npx vitest run tests/unit/config.test.ts tests/unit/probe-utils.test.ts tests/unit/cli-naming.test.ts tests/unit/docs-examples.test.ts tests/unit/planner.test.ts tests/unit/mcp-input.test.ts
+        run: npx vitest run tests/unit/config.test.ts tests/unit/probe-utils.test.ts tests/unit/cli-naming.test.ts tests/unit/docs-examples.test.ts tests/unit/planner.test.ts tests/unit/mcp-input.test.ts tests/unit/windows-wave-a.test.ts tests/unit/windows-wave-b1.test.ts tests/unit/windows-wave-b2.test.ts tests/unit/windows-wave-c.test.ts tests/unit/windows-review-fixes.test.ts

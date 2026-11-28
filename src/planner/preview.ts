@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { DRIVER_SECURITY_GUARANTEES } from "../adapters/registry.js";
+import { effectivePiModelProvider } from "../adapters/pi.js";
 import type { ConfigSnapshot, ResolvedHarness, ResolvedModel } from "../config/resolver.js";
 import { resolveModelAlias } from "../config/resolver.js";
 import { emptyCliLimits } from "../config/cli-limits.js";
@@ -391,7 +392,7 @@ function isInstalled(health: Record<string, HarnessHealth> | undefined, candidat
 function healthForCandidate(health: HarnessHealth | undefined, candidate: Candidate): HarnessHealth | undefined {
   if (!health || health.auth_status === "unknown") return health;
   const { driver, default_upstream_provider: checkedProvider } = candidate.harness;
-  const modelProvider = candidate.model.cli_provider;
+  const modelProvider = driver === "pi" ? effectivePiModelProvider(candidate.model) : undefined;
   if (driver !== "pi" || modelProvider === undefined || modelProvider === checkedProvider) return health;
   return { ...health, auth_status: "unknown" };
 }

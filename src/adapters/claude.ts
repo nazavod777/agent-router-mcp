@@ -3,6 +3,7 @@ import { redactSecrets } from "../logging.js";
 import { ProgressTracker } from "../runtime/checkpoint.js";
 import { truncateUtf8 } from "../runtime/output.js";
 import type { HarnessHealth, ProgressCheckpoint, RunMode, SecurityGuarantee, StructuredError, UsageStats } from "../types.js";
+import { inspectClaudeReadonlyForwardedEnv } from "./claude-settings-env.js";
 import { MAX_DIAGNOSTIC_ERROR_BYTES, assertSandboxExtraArgs, isNonResultEvent, outputModeFor } from "./parsers.js";
 import {
   BoundedLines,
@@ -38,6 +39,8 @@ import type {
   ParsedAdapterResult,
 } from "./types.js";
 
+export { inspectClaudeReadonlyForwardedEnv } from "./claude-settings-env.js";
+
 const LABEL = "Claude Code";
 const SYSTEM_PROMPT_FILE = "claude-system.txt";
 const SETTINGS_FILE = "claude-settings.json";
@@ -49,7 +52,7 @@ const DISALLOWED_TOOLS_FLAGS = ["--disallowed-tools", "--disallowedTools"] as co
 /** Flags that would widen tools, permissions, MCP servers or settings beyond the readonly profile built below. */
 const FORBIDDEN_READONLY_ARGS = new RegExp(`^(?:${[
   "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--permission-mode", "--tools",
-  "--allowedTools", "--allowed-tools", "--mcp-config", "--settings", ...DISALLOWED_TOOLS_FLAGS,
+  "--allowedTools", "--allowed-tools", "--mcp-config", "--settings", "--add-dir", ...DISALLOWED_TOOLS_FLAGS,
 ].join("|")})(?:=|$)`);
 /**
  * Flags that drop Claude's permission checks or widen what a write run may touch beyond the edit-only profile built below
@@ -166,7 +169,8 @@ function resultErrorMessages(result: JsonObject): string {
   const messages = (result.errors as unknown[])
     .map((entry) => (isObject(entry) ? asString(entry.message) : asString(entry)))
     .filter((message): message is string => message !== undefined && message.trim() !== "");
-  return truncateUtf8(messages.join("\n"), MAX_DIAGNOSTIC_ERROR_BYTES).text;
+  // Redacted before it is cut, so a secret straddling the cut cannot leave a recognizable prefix behind.
+  return truncateUtf8(redactSecrets(messages.join("\n")), MAX_DIAGNOSTIC_ERROR_BYTES).text;
 }
 
 function contentBlocks(event: JsonObject): JsonObject[] {
@@ -278,7 +282,7 @@ class ClaudeStreamParser implements AdapterStreamParser {
     const errorKind = asString(event.error);
     if (errorKind && this.assistantErrorBytes < MAX_ASSISTANT_ERROR_BYTES) {
       const detail = `${errorKind}${texts.length ? `: ${texts.join("")}` : ""}`;
-      const clipped = truncateUtf8(detail, MAX_ASSISTANT_ERROR_BYTES - this.assistantErrorBytes).text;
+      const clipped = truncateUtf8(redactSecrets(detail), MAX_ASSISTANT_ERROR_BYTES - this.assistantErrorBytes).text;
       this.assistantErrors.push(clipped);
       this.assistantErrorBytes += Buffer.byteLength(clipped);
     }
@@ -300,7 +304,10 @@ class ClaudeStreamParser implements AdapterStreamParser {
           : this.rawText.text().trim() || this.lines.text().trim() || undefined;
         return classifiedFailure(LABEL, input, reported, "NON_ZERO_EXIT", { warnings, summary: streamMode ? this.lastAssistantText.text() : undefined });
       }
-      return degradedOrParseError(LABEL, input, streamMode ? this.lastAssistantText.text() : this.rawText.text(), "no result object");
+      return degradedOrParseError(LABEL, input, streamMode ? this.lastAssistantText.text() : this.rawText.text(), "no result object", {
+        // Typed assistant messages arrived, so the text is the model's own prose, never a CLI diagnostic.
+        allowStdoutErrorClassification: !streamMode,
+      });
     }
 
     const usage = claudeUsage(result);
@@ -320,10 +327,14 @@ class ClaudeStreamParser implements AdapterStreamParser {
       const message = isError
         ? resultText || resultErrorMessages(result) || assistantErrors || (subtype ? `result subtype ${subtype}` : undefined)
         : assistantErrors || undefined;
+      // When the CLI flagged an error and no assistant text was streamed, `text` is only the error message itself; keeping
+      // it out of the summary leaves the shared/write safe_to_reroute decision to real partial output.
+      const assistantText = this.lastAssistantText.text();
+      const summary = isError ? (assistantText.trim() === (message ?? "").trim() ? "" : assistantText) : text;
       return classifiedFailure(LABEL, input, message, "NON_ZERO_EXIT", {
         usage,
         warnings,
-        summary: text,
+        summary,
         details: {
           subtype: safeDetailLabel(subtype),
           is_error: result.is_error === true,
@@ -430,6 +441,17 @@ export class ClaudeAdapter implements CliAdapter {
     const disablesSubagents = control !== undefined && (control.policy === "off" || control.maxDepth === 0);
     const clampDepth = input.mode === "write" && control !== undefined && (disablesSubagents || lowersDepth);
     let envOverrides: Record<string, string> | undefined;
+    const warnings: string[] = [];
+    let secrets: string[] | undefined;
+    if (input.mode === "readonly") {
+      // `--restricted` skips the user's settings.json, so its allowlisted auth/endpoint variables are forwarded as env.
+      const forwarded = await inspectClaudeReadonlyForwardedEnv(input.env ?? process.env, input.cwd, {
+        extraRepoRoots: input.sourceCwd !== undefined ? [input.sourceCwd] : [],
+      });
+      warnings.push(...forwarded.warnings);
+      if (forwarded.names.length > 0) envOverrides = { ...forwarded.env };
+      if (forwarded.secrets.length > 0) secrets = forwarded.secrets;
+    }
     if (clampDepth) {
       const depth = String(disablesSubagents ? 0 : control.maxDepth);
       // The env block of the user's settings.json outranks the process environment, so the clamp also goes through
@@ -442,7 +464,7 @@ export class ClaudeAdapter implements CliAdapter {
         extraArgs = denied.args;
         if (!denied.merged) args.push("--disallowed-tools", NATIVE_SUBAGENT_TOOLS);
       }
-      envOverrides = { [SUBAGENT_DEPTH_ENV]: depth };
+      envOverrides = { ...envOverrides, [SUBAGENT_DEPTH_ENV]: depth };
     }
     args.push(...extraArgs);
 
@@ -453,8 +475,9 @@ export class ClaudeAdapter implements CliAdapter {
       // extra_args may force buffered `json` output; only the final args decide whether events stream.
       outputMode: outputModeFor(args, ["--output-format"], "stream-json"),
       ...(envOverrides ? { envOverrides } : {}),
+      ...(secrets ? { secrets } : {}),
       tempFiles,
-      warnings: [],
+      warnings,
       nativeEffort,
     };
   }

@@ -1809,16 +1809,18 @@ const parseInheritMcp = (value) => (value === "true" ? true : value === "false" 
         expect(comma.defaultPrevented).toBe(false);
       });
 
-      it("ignores Enter on blank text and keeps the typed text pending for Save through trackPending", () => {
+      it("ignores Enter on empty text and keeps the typed text pending for Save through trackPending", () => {
         const { adder, changes, pending, addButton } = build(["x"]);
-        adder.value = "   ";
+        adder.value = "";
         const event = key(adder, "Enter", { target: adder });
         expect(event.defaultPrevented).toBe(false);
         expect(changes).toEqual([]);
         expect([...pending.keys()]).toEqual(["h-extra_args"]);
+        expect(pending.get("h-extra_args")!()).toBe(true);
+        expect(changes).toEqual([]);
         adder.value = " -c ";
         expect(pending.get("h-extra_args")!()).toBe(true);
-        expect(changes).toEqual([[["x", "-c"], true]]);
+        expect(changes).toEqual([[["x", " -c "], true]]);
         adder.value = "--dup";
         addButton.handlers.onclick({});
         expect(changes.at(-1)).toEqual([["x", "--dup"], true]);
@@ -1897,10 +1899,10 @@ const parseInheritMcp = (value) => (value === "true" ? true : value === "false" 
         expect(harnessDraftProblem({ display_name: "A" })).toBe("Enter a name and an executable.");
       });
 
-      it("drops blank argv rows on save but keeps every other token verbatim, commas and duplicates included", () => {
+      it("drops only empty argv rows on save and keeps every other token verbatim, whitespace, commas and duplicates included", () => {
         const { cleanHarnessDraft } = load<any>(["dropBlankOptionals", "cleanHarnessDraft"], {}, "cleanHarnessDraft");
-        const cleaned = cleanHarnessDraft({ display_name: "A", binary: "a", extra_args: ["-c", "", "k=v", "  ", "-c", "--enabled-tools a,b"] });
-        expect(cleaned.extra_args).toEqual(["-c", "k=v", "-c", "--enabled-tools a,b"]);
+        const cleaned = cleanHarnessDraft({ display_name: "A", binary: "a", extra_args: ["-c", "", "k=v", "  ", "-c", " --flag ", "--enabled-tools a,b"] });
+        expect(cleaned.extra_args).toEqual(["-c", "k=v", "  ", "-c", " --flag ", "--enabled-tools a,b"]);
       });
 
       it("clears a write mode that the newly chosen driver does not know and keeps a compatible one", () => {

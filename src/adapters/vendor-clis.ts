@@ -2,7 +2,7 @@ import type { HarnessConfig } from "../config/schema.js";
 import { DRIVER_METADATA, type DriverKind } from "../drivers.js";
 import type { HarnessHealth, ProgressCheckpoint, RunMode, SecurityGuarantee } from "../types.js";
 import {
-  assertArgvPromptFits, assertCommandLineFits, assertSandboxExtraArgs, createJsonResultParser, createNdjsonParser,
+  BoundedMessages, assertArgvPromptFits, assertCommandLineFits, assertSandboxExtraArgs, createJsonResultParser, createNdjsonParser,
   extractClaudeLikeResult, extractContentText, isToolTrafficEvent, outputModeFor, versionAtLeast, withInlineSystemContext,
   writePromptFile, type SandboxArgsPolicy,
 } from "./parsers.js";
@@ -139,12 +139,18 @@ function streamUsage(event: JsonObject, type: string | undefined) {
   });
 }
 
+/** The message of an error value: a plain string, `{ message }`, or the nested `{ data: { message } }` some CLIs wrap it in. */
+function structuredErrorMessage(error: unknown): string | undefined {
+  if (!isObject(error)) return asString(error);
+  return asString(error.message) ?? (isObject(error.data) ? asString(error.data.message) : undefined);
+}
+
 export function createAssistantEventParser(
   label: string,
 ): AdapterStreamParser & { checkpoint(): ProgressCheckpoint; progressEvents(): number } {
   return createNdjsonParser({
     label,
-    initial: () => ({ text: "", bytes: 0 }),
+    initial: () => ({ text: "", bytes: 0, errors: new BoundedMessages() }),
     extractText: (data) => data.text,
     onEvent(event, state) {
       const type = asString(event.type) ?? asString(event.event);
@@ -157,7 +163,9 @@ export function createAssistantEventParser(
       state.usage = streamUsage(event, type) ?? state.usage;
       if (type === "error" || event.error || event.is_error === true) {
         const error = event.error ?? payload.error;
-        state.errors[0] = (isObject(error) ? asString(error.message) : asString(error)) ?? asString(event.message) ?? `${label} reported an error.`;
+        // Every error event is kept (bounded), so a later generic one cannot hide the message that names the cause.
+        state.data.errors.push(structuredErrorMessage(error) ?? asString(event.message) ?? `${label} reported an error.`);
+        state.errors = [...state.data.errors.values()];
         return;
       }
 

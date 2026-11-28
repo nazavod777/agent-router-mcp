@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
 import { delimiter, isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { resolveBinary } from "../adapters/probe-utils.js";
+import { resolveLaunch, type LaunchCommand } from "../adapters/probe-utils.js";
 import type { StructuredError } from "../types.js";
 
 const execFileAsync = promisify(execFile);
@@ -15,26 +15,60 @@ const GIT_LOCAL_ENV = [
   "GIT_SHALLOW_FILE", "GIT_WORK_TREE",
 ];
 
+/** Windows environment names are case-insensitive (`Path`, `PATH`, `Git_Dir`), but a copied environment is a plain case-sensitive object. */
+function foldsCase(platform: NodeJS.Platform): boolean {
+  return platform === "win32";
+}
+
+function envKeysFor(env: NodeJS.ProcessEnv, name: string, platform: NodeJS.Platform): string[] {
+  if (!foldsCase(platform)) return Object.hasOwn(env, name) ? [name] : [];
+  const upper = name.toUpperCase();
+  return Object.keys(env).filter((key) => key.toUpperCase() === upper);
+}
+
+/** Value of `name`; on Windows the name matches regardless of case. An exact-case key wins over a differently-cased one. */
+export function getEnvValue(env: NodeJS.ProcessEnv, name: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  if (Object.hasOwn(env, name)) return env[name];
+  const key = envKeysFor(env, name, platform)[0];
+  return key === undefined ? undefined : env[key];
+}
+
+/** Removes `name` (on Windows: every spelling of it) from `env`. */
+export function deleteEnvValue(env: NodeJS.ProcessEnv, name: string, platform: NodeJS.Platform = process.platform): void {
+  for (const key of envKeysFor(env, name, platform)) delete env[key];
+}
+
+/** Sets `name` to `value`; on Windows an existing differently-cased spelling (`Path` for `PATH`) is replaced, never duplicated. */
+export function setEnvValue(env: NodeJS.ProcessEnv, name: string, value: string, platform: NodeJS.Platform = process.platform): void {
+  deleteEnvValue(env, name, platform);
+  env[name] = value;
+}
+
 function parseDepth(value: string | undefined): number | undefined {
   if (value === undefined || !/^\d+$/.test(value)) return undefined;
   const depth = Number(value);
   return Number.isSafeInteger(depth) ? depth : undefined;
 }
 
-export function getCurrentOrchDepth(env: NodeJS.ProcessEnv = process.env): number {
-  if (env.ORCH_DEPTH === undefined) return 0;
-  return parseDepth(env.ORCH_DEPTH) ?? Number.MAX_SAFE_INTEGER;
+export function getCurrentOrchDepth(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): number {
+  const depth = getEnvValue(env, "ORCH_DEPTH", platform);
+  if (depth === undefined) return 0;
+  return parseDepth(depth) ?? Number.MAX_SAFE_INTEGER;
 }
 
 /** ORCH_MAX_DEPTH can only tighten the configured limit, never raise it. */
-export function effectiveMaxDepth(maxDepth: number, env: NodeJS.ProcessEnv = process.env): number {
-  const envLimit = parseDepth(env.ORCH_MAX_DEPTH);
+export function effectiveMaxDepth(
+  maxDepth: number, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform,
+): number {
+  const envLimit = parseDepth(getEnvValue(env, "ORCH_MAX_DEPTH", platform));
   return envLimit === undefined ? maxDepth : Math.min(envLimit, maxDepth);
 }
 
-export function checkRecursionLimit(maxDepth: number, env: NodeJS.ProcessEnv = process.env): StructuredError | null {
-  const currentDepth = getCurrentOrchDepth(env);
-  const limit = effectiveMaxDepth(maxDepth, env);
+export function checkRecursionLimit(
+  maxDepth: number, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform,
+): StructuredError | null {
+  const currentDepth = getCurrentOrchDepth(env, platform);
+  const limit = effectiveMaxDepth(maxDepth, env, platform);
   if (currentDepth < limit && currentDepth < Number.MAX_SAFE_INTEGER) return null;
   return {
     code: "RECURSION_BLOCKED",
@@ -48,8 +82,8 @@ const JOB_CHAIN_SEPARATOR = ",";
 const SAFE_CHAIN_TOKEN = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 
 /** Ancestry of job IDs inherited from an outer orchestrator, with malformed tokens dropped. */
-function inheritedJobChain(env: NodeJS.ProcessEnv): string[] {
-  return (env.ORCH_JOB_CHAIN ?? "").split(JOB_CHAIN_SEPARATOR).filter((token) => SAFE_CHAIN_TOKEN.test(token));
+function inheritedJobChain(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
+  return (getEnvValue(env, "ORCH_JOB_CHAIN", platform) ?? "").split(JOB_CHAIN_SEPARATOR).filter((token) => SAFE_CHAIN_TOKEN.test(token));
 }
 
 /**
@@ -64,18 +98,19 @@ export function buildChildEnv(opts: {
   extra?: Record<string, string>;
   /** Configured orchestration depth limit; the child inherits the tighter of it and its own ORCH_MAX_DEPTH. */
   maxDepth?: number;
+  /** Test seam: platform whose environment-name rules apply (Windows names are case-insensitive); defaults to the running one. */
+  platform?: NodeJS.Platform;
 }): NodeJS.ProcessEnv {
+  const platform = opts.platform ?? process.platform;
   const baseEnv = opts.baseEnv ?? process.env;
-  const inherited = { ...baseEnv };
-  for (const name of GIT_LOCAL_ENV) delete inherited[name];
-  return {
-    ...inherited,
-    ...opts.extra,
-    ORCH_DEPTH: String(opts.nextDepth),
-    ORCH_JOB_ID: opts.jobId,
-    ORCH_JOB_CHAIN: [...inheritedJobChain(baseEnv), opts.jobId].join(JOB_CHAIN_SEPARATOR),
-    ...(opts.maxDepth === undefined ? {} : { ORCH_MAX_DEPTH: String(effectiveMaxDepth(opts.maxDepth, baseEnv)) }),
-  };
+  const env: NodeJS.ProcessEnv = { ...baseEnv };
+  for (const name of GIT_LOCAL_ENV) deleteEnvValue(env, name, platform);
+  for (const [name, value] of Object.entries(opts.extra ?? {})) setEnvValue(env, name, value, platform);
+  setEnvValue(env, "ORCH_DEPTH", String(opts.nextDepth), platform);
+  setEnvValue(env, "ORCH_JOB_ID", opts.jobId, platform);
+  setEnvValue(env, "ORCH_JOB_CHAIN", [...inheritedJobChain(baseEnv, platform), opts.jobId].join(JOB_CHAIN_SEPARATOR), platform);
+  if (opts.maxDepth !== undefined) setEnvValue(env, "ORCH_MAX_DEPTH", String(effectiveMaxDepth(opts.maxDepth, baseEnv, platform)), platform);
+  return env;
 }
 
 export interface ValidatedCwd {
@@ -97,20 +132,27 @@ export const NULL_DEVICE = process.platform === "win32" ? "NUL" : "/dev/null";
 const JOB_ID_ENV = "ORCH_JOB_ID";
 
 /** `jobId` marks the Git process (and everything it spawns) as belonging to a job, so process-tree cleanup can find it. */
-export function gitEnvironment(jobId?: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C", GIT_OPTIONAL_LOCKS: "0" };
-  for (const name of GIT_LOCAL_ENV) delete env[name];
-  if (jobId !== undefined) env[JOB_ID_ENV] = jobId;
+export function gitEnvironment(jobId?: string, platform: NodeJS.Platform = process.platform, baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...baseEnv };
+  setEnvValue(env, "LC_ALL", "C", platform);
+  setEnvValue(env, "GIT_OPTIONAL_LOCKS", "0", platform);
+  for (const name of GIT_LOCAL_ENV) deleteEnvValue(env, name, platform);
+  if (jobId !== undefined) setEnvValue(env, JOB_ID_ENV, jobId, platform);
   return env;
 }
 
 /** Git environment that ignores the system and global config, so neither can add filters, hooks or other commands. */
-export function isolatedGitEnvironment(jobId?: string): NodeJS.ProcessEnv {
-  return { ...gitEnvironment(jobId), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: NULL_DEVICE };
+export function isolatedGitEnvironment(
+  jobId?: string, platform: NodeJS.Platform = process.platform, baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env = gitEnvironment(jobId, platform, baseEnv);
+  setEnvValue(env, "GIT_CONFIG_NOSYSTEM", "1", platform);
+  setEnvValue(env, "GIT_CONFIG_GLOBAL", NULL_DEVICE, platform);
+  return env;
 }
 
-export function allowedRootsFromEnv(env: NodeJS.ProcessEnv): string[] {
-  return (env.ORCH_ALLOWED_ROOTS ?? "").split(delimiter).filter(Boolean);
+export function allowedRootsFromEnv(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): string[] {
+  return (getEnvValue(env, "ORCH_ALLOWED_ROOTS", platform) ?? "").split(delimiter).filter(Boolean);
 }
 
 const FILTER_KEY_PATTERN = "^filter\\..*\\.(smudge|process|clean)$";
@@ -123,16 +165,34 @@ export const MAX_FILTER_OVERRIDES = 256;
 export const IGNORE_SUBMODULES = "--ignore-submodules=all";
 
 /**
- * Absolute path of the `git` executable used for every service Git call. It is resolved through `resolveBinary`, which
- * skips relative PATH entries (`.`, empty, `./bin`), so a `git` planted in a job's working directory can never run.
- * Throws an `ENOENT` error when Git is not installed (callers treat that as "not a Git repository" where that is safe).
+ * What to spawn for Git, for every service Git call. The binary is resolved through `resolveLaunch`, which skips relative
+ * PATH entries (`.`, empty, `./bin`), so a `git` planted in a job's working directory can never run, and which replaces
+ * a Windows npm-style `.cmd` shim by `node <script>` (a `.cmd` cannot be started without a shell). Throws an `ENOENT`
+ * error when Git is not installed (callers treat that as "not a Git repository" where that is safe).
  */
-export function gitExecutable(): string {
-  const path = resolveBinary("git");
-  if (path === undefined) {
+export function gitLaunch(): LaunchCommand {
+  let launch: LaunchCommand | undefined;
+  try {
+    launch = resolveLaunch("git");
+  } catch (error) {
+    const reason = (error as { message?: unknown }).message;
+    throw new Error(typeof reason === "string" ? reason : "The git executable cannot be started.", { cause: error });
+  }
+  if (launch === undefined) {
     throw Object.assign(new Error("The git executable was not found in an absolute PATH directory."), { code: "ENOENT" });
   }
-  return path;
+  return launch;
+}
+
+/** Absolute path of the program that runs Git (see `gitLaunch`). */
+export function gitExecutable(): string {
+  return gitLaunch().command;
+}
+
+/** Program and full argument list for one Git call: the launcher's own arguments come first. */
+export function gitInvocation(args: readonly string[]): { command: string; args: string[] } {
+  const launch = gitLaunch();
+  return { command: launch.command, args: [...launch.prefixArgs, ...args] };
 }
 
 /** Thrown when a repository configures more filters than can be neutralized; running Git would execute the rest. */
@@ -164,11 +224,10 @@ export class UnblankableGitFilterError extends Error {
 export async function filterOverrides(cwd: string, opts: { signal?: AbortSignal; jobId?: string } = {}): Promise<string[]> {
   let output: string;
   try {
-    ({ stdout: output } = await execFileAsync(gitExecutable(), [
-      "-c", "core.fsmonitor=false", "config", "--includes", "--name-only", "--get-regexp", FILTER_KEY_PATTERN,
-    ], {
+    const git = gitInvocation(["-c", "core.fsmonitor=false", "config", "--includes", "--name-only", "--get-regexp", FILTER_KEY_PATTERN]);
+    ({ stdout: output } = await execFileAsync(git.command, git.args, {
       cwd, env: isolatedGitEnvironment(opts.jobId), timeout: GIT_TIMEOUT_MS, killSignal: "SIGKILL", maxBuffer: 1024 * 1024,
-      signal: opts.signal,
+      signal: opts.signal, windowsHide: true,
     }));
   } catch (error) {
     if ((error as { code?: unknown }).code === 1) return []; // No such key configured.
@@ -195,20 +254,23 @@ export async function runFilterFreeGit(
   cwd: string, args: string[], opts: { jobId?: string; signal?: AbortSignal; timeout: number; maxBuffer: number },
 ): Promise<Buffer> {
   const overrides = await filterOverrides(cwd, opts);
-  const { stdout } = await execFileAsync(gitExecutable(), ["-c", "core.fsmonitor=false", "-c", `core.hooksPath=${NULL_DEVICE}`, ...overrides, ...args], {
+  const git = gitInvocation(["-c", "core.fsmonitor=false", "-c", `core.hooksPath=${NULL_DEVICE}`, ...overrides, ...args]);
+  const { stdout } = await execFileAsync(git.command, git.args, {
     cwd, env: isolatedGitEnvironment(opts.jobId), timeout: opts.timeout, killSignal: "SIGKILL", maxBuffer: opts.maxBuffer,
-    signal: opts.signal, encoding: "buffer",
+    signal: opts.signal, encoding: "buffer", windowsHide: true,
   });
   return stdout;
 }
 
 async function gitProbe(cwd: string, args: string[], jobId?: string): Promise<string> {
-  const { stdout } = await execFileAsync(gitExecutable(), ["-c", "core.fsmonitor=false", ...args], {
+  const git = gitInvocation(["-c", "core.fsmonitor=false", ...args]);
+  const { stdout } = await execFileAsync(git.command, git.args, {
     cwd,
     env: gitEnvironment(jobId),
     timeout: GIT_TIMEOUT_MS,
     killSignal: "SIGKILL",
     maxBuffer: 4 * 1024 * 1024,
+    windowsHide: true,
   });
   return stdout.replace(/\r?\n$/, "");
 }

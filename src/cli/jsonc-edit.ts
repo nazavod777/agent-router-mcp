@@ -230,6 +230,12 @@ export function detectIndentUnit(text: string): string {
   return /^ {1,8}$/.test(indent) ? indent : DEFAULT_INDENT;
 }
 
+/** The line ending the document already uses: `\r\n` when its first line break is one, else `\n`. */
+export function detectEol(text: string): "\r\n" | "\n" {
+  const firstBreak = text.indexOf("\n");
+  return firstBreak > 0 && text[firstBreak - 1] === "\r" ? "\r\n" : "\n";
+}
+
 function lineIndent(text: string, offset: number): string {
   const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
   const match = /^[ \t]*/.exec(text.slice(lineStart, offset));
@@ -241,8 +247,8 @@ function startsOwnLine(text: string, offset: number): boolean {
   return /^[ \t]*$/.test(text.slice(lineStart, offset));
 }
 
-function serialize(value: JsonValue, indentUnit: string, baseIndent: string): string {
-  return JSON.stringify(value, null, indentUnit).replace(/\n/g, `\n${baseIndent}`);
+function serialize(value: JsonValue, indentUnit: string, baseIndent: string, eol: string): string {
+  return JSON.stringify(value, null, indentUnit).replace(/\n/g, `${eol}${baseIndent}`);
 }
 
 function wrapPath(path: readonly string[], value: JsonValue): JsonValue {
@@ -266,27 +272,27 @@ function afterLastMember(text: string, node: ObjectNode): { insertAt: number; co
   if (hasComma) cursor += 1;
   while (text[cursor] === " " || text[cursor] === "\t") cursor += 1;
   const rest = text.slice(cursor);
-  const comment = /^\/\/[^\n]*/.exec(rest) ?? /^\/\*(?:(?!\*\/)[^\n])*\*\//.exec(rest);
+  const comment = /^\/\/[^\r\n]*/.exec(rest) ?? /^\/\*(?:(?!\*\/)[^\r\n])*\*\//.exec(rest);
   if (comment) insertAt = cursor + comment[0].length;
   return { insertAt, commaAt: hasComma ? undefined : valueEnd };
 }
 
-/** Inserts `"key": value` as the last member of `node`, matching the object's indentation. */
-function insertMember(text: string, node: ObjectNode, key: string, value: JsonValue, indentUnit: string): Splice[] {
+/** Inserts `"key": value` as the last member of `node`, matching the object's indentation and line endings. */
+function insertMember(text: string, node: ObjectNode, key: string, value: JsonValue, indentUnit: string, eol: string): Splice[] {
   const keyJson = JSON.stringify(key);
   const objectIndent = lineIndent(text, node.start);
   if (node.members.length === 0) {
     const inner = `${objectIndent}${indentUnit}`;
-    const member = `${inner}${keyJson}: ${serialize(value, indentUnit, inner)}`;
+    const member = `${inner}${keyJson}: ${serialize(value, indentUnit, inner, eol)}`;
     if (/^\s*$/.test(text.slice(node.start + 1, node.end - 1))) {
-      return [{ start: node.start + 1, end: node.end - 1, text: `\n${member}\n${objectIndent}` }];
+      return [{ start: node.start + 1, end: node.end - 1, text: `${eol}${member}${eol}${objectIndent}` }];
     }
     // Comments inside the empty object stay; the member goes just before the closing brace.
     const close = node.end - 1;
     const lineStart = text.lastIndexOf("\n", close - 1) + 1;
     return /^[ \t]*$/.test(text.slice(lineStart, close))
-      ? [{ start: lineStart, end: lineStart, text: `${member}\n` }]
-      : [{ start: close, end: close, text: `\n${member}\n${objectIndent}` }];
+      ? [{ start: lineStart, end: lineStart, text: `${member}${eol}` }]
+      : [{ start: close, end: close, text: `${eol}${member}${eol}${objectIndent}` }];
   }
   if (!isMultiline(text, node)) {
     const last = node.members[node.members.length - 1];
@@ -295,7 +301,7 @@ function insertMember(text: string, node: ObjectNode, key: string, value: JsonVa
   const first = node.members[0];
   const memberIndent = startsOwnLine(text, first.keyStart) ? lineIndent(text, first.keyStart) : `${objectIndent}${indentUnit}`;
   const { insertAt, commaAt } = afterLastMember(text, node);
-  const splices: Splice[] = [{ start: insertAt, end: insertAt, text: `\n${memberIndent}${keyJson}: ${serialize(value, indentUnit, memberIndent)}` }];
+  const splices: Splice[] = [{ start: insertAt, end: insertAt, text: `${eol}${memberIndent}${keyJson}: ${serialize(value, indentUnit, memberIndent, eol)}` }];
   if (commaAt !== undefined) splices.push({ start: commaAt, end: commaAt, text: "," });
   return splices;
 }
@@ -305,16 +311,17 @@ export function setValueAt(text: string, root: JsonNode, path: readonly string[]
   if (path.length === 0) throw new Error("Cannot replace the document root.");
   const existing = getNodeAt(root, path);
   const indentUnit = detectIndentUnit(text);
+  const eol = detectEol(text);
   if (existing) {
     const member = parentMember(root, path);
     const indent = member ? lineIndent(text, member.keyStart) : "";
-    return applySplices(text, [{ start: existing.start, end: existing.end, text: serialize(value, indentUnit, indent) }]);
+    return applySplices(text, [{ start: existing.start, end: existing.end, text: serialize(value, indentUnit, indent, eol) }]);
   }
   const deepest = deepestObject(root, path);
   if (!deepest) throw new Error(`Cannot set ${path.join(".")}: an ancestor exists but is not an object.`);
   const missing = path.slice(deepest.depth);
   const wrapped = wrapPath(missing.slice(1), value);
-  return applySplices(text, insertMember(text, deepest.node, missing[0], wrapped, indentUnit));
+  return applySplices(text, insertMember(text, deepest.node, missing[0], wrapped, indentUnit, eol));
 }
 
 function parentMember(root: JsonNode, path: readonly string[]): Member | undefined {
@@ -359,7 +366,7 @@ export function removeValueAt(text: string, root: JsonNode, path: readonly strin
   }
 
   // Swallow a trailing line comment and the line break when the member sat on its own line.
-  const tail = /^[ \t]*(?:\/\/[^\n]*)?/.exec(text.slice(end));
+  const tail = /^[ \t]*(?:\/\/[^\r\n]*)?/.exec(text.slice(end));
   const afterTail = end + (tail ? tail[0].length : 0);
   if (startsOwnLine(text, start) && (text[afterTail] === "\n" || text[afterTail] === "\r" || afterTail >= text.length)) {
     start = text.lastIndexOf("\n", start - 1) + 1;

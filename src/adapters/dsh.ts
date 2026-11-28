@@ -1,11 +1,10 @@
-import { constants } from "node:fs";
-import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml, stringify } from "yaml";
 import type { HarnessConfig } from "../config/schema.js";
 import { redactSecrets } from "../logging.js";
 import { ProgressTracker } from "../runtime/checkpoint.js";
+import { getEnvValue } from "../runtime/guard.js";
 import type { HarnessHealth, ProgressCheckpoint, RunMode, SecurityGuarantee, UsageStats } from "../types.js";
 import { BoundedMessages, assertSandboxExtraArgs } from "./parsers.js";
 import {
@@ -13,6 +12,7 @@ import {
   BoundedText,
   DEFAULT_PROBE_TIMEOUT_MS,
   asNumber,
+  adapterError,
   asString,
   classifiedFailure,
   degradedOrParseError,
@@ -22,6 +22,7 @@ import {
   isExplicitEffort,
   mapEffortWith,
   probeBinaryAndVersion,
+  readOptionalConfigText,
   requireLaunch,
   safeDetailLabel,
   safeToolTarget,
@@ -246,34 +247,105 @@ function nativeSubagentPatches(control: BuildInvocationInput["nativeSubagents"])
     .map((id) => ({ id, config: { maxDepth: control.maxDepth } }));
 }
 
-/** Ids of the `mcp-*` plugins a patch document defines, at its top level or inside `insert` lists (bounded). */
-function collectMcpPluginIds(document: unknown, found: Set<string>): void {
-  if (!Array.isArray(document)) return;
-  for (const entry of document) {
-    if (!isObject(entry) || found.size >= MAX_DISABLED_MCP_PLUGINS) continue;
-    const id = asString(entry.id);
-    if (id !== undefined && MCP_PLUGIN_ID.test(id)) found.add(id);
-    collectMcpPluginIds(entry.insert, found);
+/** Specifier fields through which a DSH plugin entry names the package it loads. */
+const PLUGIN_SPECIFIER_FIELDS = ["name", "plugin", "use", "package", "module"] as const;
+const MCP_CLIENT_PACKAGE = "@deepseek-ai/dsh-mcp-client";
+const MCP_SPECIFIER = /dsh-mcp|mcp-client/i;
+const MAX_PLUGIN_ID_CHARS = 128;
+/** Keys under which a patch or profile document nests further plugin lists. */
+const NESTED_PLUGIN_LIST_KEYS = ["insert", "plugins", "patches", "patch"] as const;
+const MAX_PLUGIN_NESTING = 8;
+/** Profile names that are plain, non-reserved file names; anything else is never joined into a path. */
+const SAFE_PROFILE_FILE = /^(?!(?:con|prn|aux|nul|com\d|lpt\d)(?:\.|$))[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/i;
+
+function namesMcpClient(entry: Record<string, unknown>): boolean {
+  return PLUGIN_SPECIFIER_FIELDS.some((field) => {
+    const value = entry[field];
+    return typeof value === "string" && (value === MCP_CLIENT_PACKAGE || MCP_SPECIFIER.test(value));
+  });
+}
+
+/**
+ * Ids of the MCP plugins a patch or profile document defines, at its top level (an array, or an object holding
+ * `patches` / `patch` / `plugins`) or inside nested `insert` lists (bounded). An entry is an MCP plugin when its id
+ * starts with `mcp-` or when a specifier field (`name`, `plugin`, `use`, `package`, `module`) names the MCP client
+ * package, whatever its id. Such an entry without a usable id cannot be switched off, which `onAnonymous` reports.
+ */
+function collectMcpPluginIds(document: unknown, found: Set<string>, limit: number, onAnonymous: () => never, depth = 0): void {
+  if (depth > MAX_PLUGIN_NESTING || found.size >= limit) return;
+  if (Array.isArray(document)) {
+    for (const entry of document) {
+      if (found.size >= limit) return;
+      if (!isObject(entry)) continue;
+      const id = asString(entry.id);
+      const validId = id !== undefined && id.length > 0 && id.length <= MAX_PLUGIN_ID_CHARS;
+      if (id !== undefined && MCP_PLUGIN_ID.test(id)) found.add(id);
+      else if (namesMcpClient(entry)) {
+        if (!validId) onAnonymous();
+        found.add(id!);
+      }
+      collectMcpPluginIds(entry.insert, found, limit, onAnonymous, depth + 1);
+      collectNestedPluginContainers(entry, found, limit, onAnonymous, depth + 1);
+    }
+  } else if (isObject(document)) {
+    collectNestedPluginContainers(document, found, limit, onAnonymous, depth);
   }
 }
 
-/** The `mcp-*` plugin ids the user's DSH home patch defines; an unreadable or invalid file yields none. */
-export async function readConfiguredMcpPluginIds(env: NodeJS.ProcessEnv = process.env): Promise<string[]> {
-  let file;
-  try {
-    file = await open(join(env.DSH_HOME || join(homedir(), ".dsh"), HOME_PATCH_FILE), constants.O_RDONLY | constants.O_NONBLOCK);
-    const info = await file.stat();
-    if (!info.isFile() || info.size > MAX_HOME_PATCH_BYTES) return [];
-    const buffer = Buffer.alloc(info.size);
-    const { bytesRead } = await file.read(buffer, 0, info.size, 0);
-    const found = new Set<string>();
-    collectMcpPluginIds(parseYaml(buffer.toString("utf8", 0, bytesRead), { maxAliasCount: 0 }), found);
-    return [...found];
-  } catch {
-    return [];
-  } finally {
-    await file?.close();
+/** Follows the nested plugin lists of one object, and its `config` (a group's plugins live under `group.config`). */
+function collectNestedPluginContainers(
+  container: Record<string, unknown>, found: Set<string>, limit: number, onAnonymous: () => never, depth: number,
+): void {
+  for (const key of NESTED_PLUGIN_LIST_KEYS) collectMcpPluginIds(container[key], found, limit, onAnonymous, depth + 1);
+  if (isObject(container.config) || Array.isArray(container.config)) {
+    collectMcpPluginIds(container.config, found, limit, onAnonymous, depth + 1);
   }
+}
+
+/**
+ * The MCP plugin ids the user's DSH configuration defines: the profile files `$DSH_HOME/profiles/<profile>.yml|.yaml`
+ * and the home patch `$DSH_HOME/cordis.patch.yml` (`$DSH_HOME` defaults to `~/.dsh`). A missing file means none. A file
+ * that exists but cannot be read safely (not a regular file, oversized, unreadable, invalid YAML), an MCP plugin entry
+ * without an id, an unsafe profile name, or more than `MAX_DISABLED_MCP_PLUGINS` distinct MCP plugins fails closed:
+ * running with `inherit_mcp = false` while some plugins stay enabled would break the isolation the caller asked for.
+ */
+export async function readConfiguredMcpPluginIds(env: NodeJS.ProcessEnv = process.env, profile: string = DEFAULT_PROFILE): Promise<string[]> {
+  const home = getEnvValue(env, "DSH_HOME") || join(homedir(), ".dsh");
+  const refuseAt = (path: string, reason: string) => adapterError("SANDBOX_POLICY_VIOLATION",
+    `inherit_mcp is false, but the DSH config ${path} ${reason}, so its MCP plugins cannot all be switched off. ` +
+    `Repair the file (valid YAML, at most ${MAX_DISABLED_MCP_PLUGINS} MCP plugins, each with an id) or set inherit_mcp = true for this harness or run.`, false);
+  if (!SAFE_PROFILE_FILE.test(profile)) {
+    throw adapterError("SANDBOX_POLICY_VIOLATION",
+      "inherit_mcp is false, but the DSH profile name is not a plain file name, so the MCP plugins of that profile cannot all be switched off. " +
+      "Use a simple profile name (letters, digits, dot, dash, underscore) or set inherit_mcp = true for this harness or run.", false);
+  }
+  const paths = [
+    join(home, "profiles", `${profile}.yml`),
+    join(home, "profiles", `${profile}.yaml`),
+    join(home, "profiles", profile, HOME_PATCH_FILE),
+    join(home, HOME_PATCH_FILE),
+  ];
+  const found = new Set<string>();
+  for (const path of paths) {
+    const refuse = (reason: string) => refuseAt(path, reason);
+    let text: string | undefined;
+    try {
+      text = await readOptionalConfigText(path, MAX_HOME_PATCH_BYTES);
+    } catch (error) {
+      throw refuse(`could not be read safely (${error instanceof Error ? error.message : "unknown error"})`);
+    }
+    if (text === undefined) continue;
+    let document: unknown;
+    try {
+      document = parseYaml(text, { maxAliasCount: 0 });
+    } catch {
+      // The parser's message may quote file content, so it is not repeated.
+      throw refuse("is not valid YAML");
+    }
+    collectMcpPluginIds(document, found, MAX_DISABLED_MCP_PLUGINS + 1, () => { throw refuse("defines an MCP plugin without a usable id"); });
+    if (found.size > MAX_DISABLED_MCP_PLUGINS) throw refuse(`defines more than ${MAX_DISABLED_MCP_PLUGINS} MCP plugins`);
+  }
+  return [...found];
 }
 
 export class DshAdapter implements CliAdapter {
@@ -333,7 +405,7 @@ export class DshAdapter implements CliAdapter {
     }
     if (!input.inheritMcp) {
       // Every MCP plugin goes off: the built-in ones and each `mcp-*` server the user's home patch adds.
-      const mcpIds = new Set<string>([...ALWAYS_DISABLED_MCP_PLUGINS, ...await readConfiguredMcpPluginIds()]);
+      const mcpIds = new Set<string>([...ALWAYS_DISABLED_MCP_PLUGINS, ...await readConfiguredMcpPluginIds(input.env, input.harness.profile ?? DEFAULT_PROFILE)]);
       for (const id of mcpIds) patchEntries.push({ id, disabled: true });
     }
     patchEntries.push(...nativeSubagentPatches(input.nativeSubagents));

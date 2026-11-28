@@ -42,7 +42,7 @@
 | 🧠 **Anti-hype default catalog** | 43 models from 12 labs, 23 roles, and 8 universal presets with honest weaknesses, cross-vendor review, automatic uninstalled-CLI fallback, and zero `max` effort traps |
 | 🎛️ **Technical Ledger Settings UI** | zero-dependency visual editor (`agrmcp settings`) with operational tables, live harness health and delegation readiness, a master-detail preset matrix, full `[defaults]` editing, a model-discovery review drawer, driver-aware harness and model fields, custom themed dropdowns, a persistent Save bar with status, save-rule cues, a favicon, `/` search, and a strict offline nonce CSP |
 | 🛡️ **Guarded execution** | argv-only spawn (no shell), `ORCH_DEPTH` anti-recursion, binary identity checks (`fx`/`agent`), `readonly` enforcement, process-group & grandchild cleanup, secret redaction, and bounded outputs |
-| 🧪 **Offline test suite** | 2,150 tests across 47 files covering all 17 drivers, mock-CLI integration, `agrmcp setup` / `agrmcp mcp` config editors, per-session concurrency and activity-aware timeouts, Web UI security, catalog budgeting, docs TOML examples, `agrmcp wait`, CLI limit discovery, model discovery, config quarantine, checkpoints, lenient MCP input, and real `stdio` MCP protocol smoke checks |
+| 🧪 **Offline test suite** | 2,685 tests across 52 files covering all 17 drivers, Windows process-tree / sandbox / env-case / T3 Code profile cases, mock-CLI integration, `agrmcp setup` / `agrmcp mcp` config editors, per-session concurrency and activity-aware timeouts, Web UI security, catalog budgeting, docs TOML examples, `agrmcp wait`, CLI limit discovery, model discovery, config quarantine, checkpoints, lenient MCP input, and real `stdio` MCP protocol smoke checks |
 
 ## 🎯 What it solves
 
@@ -116,7 +116,8 @@ codex mcp add orchestrator -- "$(command -v node)" "/abs/path/to/agent-router-mc
 <tr><td width="260"><img src="assets/c-antigravity.svg" height="20" align="absmiddle" alt="Antigravity"> <img src="assets/c-gemini.svg" height="20" align="absmiddle" alt="Gemini"><br><sub>Manual: Antigravity or Gemini CLI (<code>--scope user</code> = all projects)</sub></td><td>
 
 ```bash
-# Antigravity reads ~/.gemini/config/mcp_config.json (legacy: ~/.gemini/antigravity/mcp_config.json)
+# Antigravity reads ~/.gemini/config/mcp_config.json (legacy: ~/.gemini/antigravity/mcp_config.json; GEMINI_HOME overrides ~/.gemini)
+# `agrmcp setup` also finds T3 Code isolated profiles (antigravity:t3:<id>); --target antigravity:primary repairs only the primary one
 agy mcp add orchestrator -- "$(command -v node)" "/abs/path/to/agent-router-mcp/dist/cli/main.js" mcp
 gemini mcp add --scope user orchestrator "$(command -v node)" "/abs/path/to/agent-router-mcp/dist/cli/main.js" mcp
 ```
@@ -421,7 +422,7 @@ Source of truth: [`src/roles/registry.ts`](src/roles/registry.ts). Each role def
 
 - 🔁 **Anti-recursion:** child processes inherit `ORCH_DEPTH` and `ORCH_JOB_ID`; exceeding `orch_max_depth` (default `1`) fails immediately with `RECURSION_BLOCKED`.
 - 🪪 **Binary identity & argv guards:** probes verify `fx` against `antonmedv/fx` JSON viewer collisions and verify generic `agent` against Cursor's version pattern; argv-based drivers enforce a 100 KiB limit (`PROMPT_TOO_LARGE`) and reject `extra_args` that would weaken `readonly` mode (`SANDBOX_POLICY_VIOLATION`).
-- ⚙️ **Process tree cleanup:** every CLI spawns directly via argv (never through a shell) in its own process group. On POSIX, cancellation, timeout, and normal exit clean up the group (`SIGTERM` → `SIGKILL`); Linux additionally reaps escaped grandchildren via `/proc` matching `ORCH_JOB_ID` / `ORCH_JOB_CHAIN`, and macOS relies on POSIX process groups. On Windows, termination uses `taskkill /T` (then `/T /F`, with a `process.kill(pid)` fallback when `taskkill` is unavailable) rather than process groups.
+- ⚙️ **Process tree cleanup:** every CLI spawns directly via argv (never through a shell) in its own process group. On POSIX, cancellation, timeout, and normal exit clean up the group (`SIGTERM` → `SIGKILL`); Linux additionally reaps escaped grandchildren via `/proc` matching `ORCH_JOB_ID` / `ORCH_JOB_CHAIN`, and macOS relies on POSIX process groups. On Windows, CLIs start hidden and headless (`windowsHide: true`, no `detached` console flash) and termination uses `taskkill /T` (then `/T /F`, with a `process.kill(pid)` fallback when `taskkill` is unavailable) followed by a descendant check against the Windows process table, rather than process groups. Codex on Windows that cannot start its OS sandbox fails with `SANDBOX_UNAVAILABLE`; sandbox flags are never weakened.
 - 🌿 **Path & plan confinement:** worktrees live under `ORCH_STATE_DIR`; working directories are checked against `ORCH_ALLOWED_ROOTS`; strict `require_plan_id` (`false` by default) verifies that execution parameters and config revision match a valid `orch_plan_preview` row.
 - 🌐 **Hardened localhost Web UI:** binds strictly to `127.0.0.1` on an ephemeral port with strict `Host` validation (anti-DNS-rebinding); exchanges a one-time URL token (valid for 5 minutes after start) for an `HttpOnly; SameSite=Strict` cookie; hands an origin-bound `X-Orch-Token` to the page only through the URL fragment of the one-time redirect (`/#t=<token>`, never sent over HTTP and never present in the served HTML; the page keeps it in per-origin, per-port `sessionStorage` and clears the fragment at once) and requires it, together with the cookie, on **every** `/api/*` call, reads such as `GET /api/state` and `/api/health` included; refuses any browser request whose `Sec-Fetch-Site` is not `same-origin`; additionally enforces exact `Origin` + `Content-Type: application/json` + 256 KiB cap on writes, plus a nonce CSP and zero CORS; shuts down after 15 min idle (kept alive by open-tab heartbeat).
 - 🕶️ **Secret redaction:** values of env vars containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, or `CREDENTIAL`, plus `Bearer` tokens and `Authorization` headers, are scrubbed from logs, summaries, diffs, and error responses; literal environment-value redaction matches secret values of at least 8 characters. User config, prompt files, and backups are written with mode `0600`.
@@ -447,7 +448,7 @@ Under `[defaults]`, `run_retention_days` sets the age limit (default 7 days) and
 - 📏 **Argv prompt limit:** CLIs that accept prompts only via argv (`antigravity`, `cursor`, `grok`, `kiro`, `fx`, `copilot`, `kimi`, `vibe`) enforce a 100 KiB cap (`PROMPT_TOO_LARGE`) to stay below Linux `MAX_ARG_STRLEN`; use stdin/file drivers (`claude`, `codex`, `dsh`, `pi`, `opencode`, `gemini`, `qwen`, `muse`, `droid`) for massive prompts.
 - 🔁 **Failover limits:** cooldowns last only for the current MCP server session; unclassified failures surface as `NON_ZERO_EXIT` / `PARSE_ERROR` with the verbatim `raw_error` for the agent to judge. If every harness fails, the HARD STOP rule applies: stop all main work, preserve dirty edits and worktrees, and notify the user with every blocked harness, the verbatim errors, and recovery options.
 - <img src="assets/c-git.svg" height="20" align="absmiddle" alt="Git"> Isolated write worktrees branch from `HEAD` — uncommitted edits in your parent checkout are intentionally not copied into child worktrees.
-- <img src="assets/c-macos.svg" height="20" align="absmiddle" alt="macOS"> <img src="assets/c-windows.svg" height="20" align="absmiddle" alt="Windows"> `/proc` + `ORCH_JOB_CHAIN` reaping of detached grandchildren is Linux-only; macOS relies on POSIX process groups, and Windows uses `taskkill /T` (then `/T /F`, with a `process.kill(pid)` fallback) rather than process groups.
+- <img src="assets/c-macos.svg" height="20" align="absmiddle" alt="macOS"> <img src="assets/c-windows.svg" height="20" align="absmiddle" alt="Windows"> `/proc` + `ORCH_JOB_CHAIN` reaping of detached grandchildren is Linux-only; macOS relies on POSIX process groups, and Windows uses `taskkill /T` (then `/T /F`, with a `process.kill(pid)` fallback) plus post-exit descendant verification rather than process groups. Claude `readonly` (`--restricted`) forwards only a strict allowlist of auth/endpoint variables from user-level `settings.json` (never project files, proxy/CA/custom-header variables), and `--restricted` is never weakened.
 
 ## ✅ Test status
 
@@ -464,7 +465,7 @@ npm run build && npm run typecheck && npm test
 | 🔒 **Settings UI security** | Host header rebinding, one-time token → cookie, Origin/CSRF/Content-Type/size cap, 409 conflicts, dynamic `supported_drivers`, reset backups, discovery preview/import with 409 conflict and 410 expiry recovery |
 | 📡 **MCP stdio smoke** | Real JSON-RPC `stdio` server spawn, `tools/list`, 17-harness `orch_catalog` pagination under 24 KB, `orch_plan_preview`, `orch_run` → `orch_status` |
 
-The offline suite contains **2,150 tests across 47 files**.
+The offline suite contains **2,685 tests across 52 files**, including Windows process-tree, sandbox, env-case, and T3 Code profile coverage.
 
 ## 🗂️ Layout
 
@@ -481,7 +482,7 @@ The offline suite contains **2,150 tests across 47 files**.
 | <img src="assets/c-mcp.svg" height="20" align="absmiddle" alt="MCP"> | `src/mcp/` & `src/cli/` | `stdio` MCP server, 6 tool handlers, the unified `agrmcp` CLI, `agrmcp setup` / `agrmcp mcp` installer, `agrmcp models discover`, lenient input validation |
 | 🎛️ | `src/settings-ui/` | Hardened localhost HTTP server & zero-dep HTML/JS visual editor |
 | 🎨 | [`DESIGN.md`](DESIGN.md) | Settings UI visual design tokens, layout, and interaction contract |
-| 🧪 | `tests/` | 2,150 offline tests across 47 files (unit, `agrmcp wait`, docs examples, adapters, model discovery, UI security, MCP smoke) |
+| 🧪 | `tests/` | 2,685 offline tests across 52 files (unit, `agrmcp wait`, docs examples, adapters, model discovery, UI security, MCP smoke) |
 | 🎨 | `assets/` | README SVGs |
 | 🤖 | `AGENTS.md` | Short instructions for AI coding agents: which job they are doing, hard guardrails, quick playbooks |
 | 🤖 | `CLAUDE.md` | Points Claude Code at `AGENTS.md` |

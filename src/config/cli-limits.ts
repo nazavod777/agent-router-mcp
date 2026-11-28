@@ -5,6 +5,7 @@ import { posix, win32 } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { parseDocument as parseYamlDocument } from "yaml";
 import type { DriverKind } from "../drivers.js";
+import { getEnvValue } from "../runtime/guard.js";
 import type { HarnessConcurrencyInfo } from "../types.js";
 import type { HarnessConfig } from "./schema.js";
 
@@ -34,7 +35,7 @@ const RELEVANT_ENV = [
   "CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", "CLAUDE_CODE_MAX_CONCURRENT_AGENTS",
   "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", "XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR",
   "OPENCODE_CONFIG", "APPDATA", "DSH_HOME", "GEMINI_CLI_HOME", "PI_CODING_AGENT_DIR", "ProgramData", "PROGRAMDATA",
-  "ProgramFiles", "PROGRAMFILES", "HOME", "USERPROFILE",
+  "ProgramFiles", "PROGRAMFILES", "HOME", "USERPROFILE", "QWEN_HOME", "KIMI_CODE_HOME",
 ] as const;
 const DSH_SUBAGENT_IDS: ReadonlySet<string> = new Set(["subagent", "subagent-spawn-in-process", "tool-subagent"]);
 
@@ -208,7 +209,7 @@ async function fileStamp(path: string): Promise<string> {
 function resolveOptions(options: CliLimitDiscoveryOptions): ResolvedOptions {
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
-  const envHome = platform === "win32" ? env.USERPROFILE : env.HOME;
+  const envHome = getEnvValue(env, platform === "win32" ? "USERPROFILE" : "HOME", platform);
   return {
     env,
     platform,
@@ -227,16 +228,21 @@ function systemPath(opts: ResolvedOptions, absolute: string): string {
 }
 
 function programData(opts: ResolvedOptions): string {
-  return opts.env.ProgramData ?? opts.env.PROGRAMDATA ?? "C:\\ProgramData";
+  return getEnvValue(opts.env, "ProgramData", opts.platform) ?? getEnvValue(opts.env, "PROGRAMDATA", opts.platform) ?? "C:\\ProgramData";
 }
 
 function programFiles(opts: ResolvedOptions): string {
-  return opts.env.ProgramFiles ?? opts.env.PROGRAMFILES ?? "C:\\Program Files";
+  return getEnvValue(opts.env, "ProgramFiles", opts.platform) ?? getEnvValue(opts.env, "PROGRAMFILES", opts.platform) ?? "C:\\Program Files";
+}
+
+/** Value of an environment variable; on Windows the name matches regardless of case. */
+function envValue(opts: ResolvedOptions, name: string): string | undefined {
+  return getEnvValue(opts.env, name, opts.platform);
 }
 
 /** A directory or file named by an environment variable; a relative value resolves against the working directory. */
 function envPath(opts: ResolvedOptions, name: string): string | undefined {
-  const value = opts.env[name];
+  const value = envValue(opts, name);
   return value ? opts.path.resolve(opts.cwd, value) : undefined;
 }
 
@@ -259,10 +265,11 @@ function claudeCandidates(opts: ResolvedOptions): Candidate[] {
 }
 
 function opencodeCandidates(opts: ResolvedOptions): Candidate[] {
-  const { path, env, home, cwd, platform } = opts;
+  const { path, home, cwd, platform } = opts;
   const candidates: Candidate[] = [];
-  if (platform === "win32" && env.APPDATA) candidates.push(...jsonPair(path, path.join(env.APPDATA, "opencode"), "opencode"));
-  candidates.push(...jsonPair(path, path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "opencode"), "opencode"));
+  const appData = envValue(opts, "APPDATA");
+  if (platform === "win32" && appData) candidates.push(...jsonPair(path, path.join(appData, "opencode"), "opencode"));
+  candidates.push(...jsonPair(path, path.join(envValue(opts, "XDG_CONFIG_HOME") || path.join(home, ".config"), "opencode"), "opencode"));
   const configDir = envPath(opts, "OPENCODE_CONFIG_DIR");
   if (configDir) candidates.push(...jsonPair(path, configDir, "opencode"));
   const configFile = envPath(opts, "OPENCODE_CONFIG");
@@ -295,6 +302,13 @@ function geminiCandidates(opts: ResolvedOptions): Candidate[] {
     .map((file) => ({ path: file, format: "json" }));
 }
 
+/** Legacy `.kimi`, then `.kimi-code`, then `KIMI_CODE_HOME` (lowest precedence first, like the other drivers). */
+function kimiCandidates(opts: ResolvedOptions): Candidate[] {
+  const { path, home } = opts;
+  const dirs = [path.join(home, ".kimi"), path.join(home, ".kimi-code"), envPath(opts, "KIMI_CODE_HOME")];
+  return [...new Set(dirs.filter((dir): dir is string => dir !== undefined))].map((dir) => ({ path: path.join(dir, "config.toml"), format: "toml" }));
+}
+
 /** Config files that can hold limits for a driver, lowest precedence first. Pure: nothing is read. */
 export function listCliConfigCandidates(
   driver: DriverKind, harness: Pick<HarnessConfig, "profile">, options: CliLimitDiscoveryOptions = {},
@@ -312,8 +326,8 @@ function candidatesFor(driver: DriverKind, harness: HarnessConfig, opts: Resolve
     case "gemini": return geminiCandidates(opts);
     case "pi": return [{ path: path.join(envPath(opts, "PI_CODING_AGENT_DIR") ?? path.join(home, ".pi", "agent"), "settings.json"), format: "json" }];
     case "droid": return [{ path: path.join(home, ".factory", "settings.json"), format: "json" }];
-    case "qwen": return [{ path: path.join(home, ".qwen", "settings.json"), format: "json" }];
-    case "kimi": return [{ path: path.join(home, ".kimi", "config.toml"), format: "toml" }];
+    case "qwen": return [{ path: path.join(envPath(opts, "QWEN_HOME") ?? path.join(home, ".qwen"), "settings.json"), format: "json" }];
+    case "kimi": return kimiCandidates(opts);
     default: return [];
   }
 }
@@ -407,7 +421,9 @@ function mergeObjects(base: Record<string, unknown>, top: Record<string, unknown
 
 function extractCodex(root: unknown, profile: string | undefined, findings: Findings, warnings: string[]): void {
   if (!isPlainObject(root)) return;
-  const profileTable = profile === undefined ? undefined : valueAt(root, ["profiles", profile]);
+  const topLevelProfile = typeof root.profile === "string" && root.profile !== "" ? root.profile : undefined;
+  const activeProfile = profile ?? topLevelProfile;
+  const profileTable = activeProfile === undefined ? undefined : valueAt(root, ["profiles", activeProfile]);
   const config = isPlainObject(profileTable) ? mergeObjects(root, profileTable) : root;
 
   const multiAgent = valueAt(config, ["features", "multi_agent"]);
@@ -502,10 +518,13 @@ function parseYamlConfig(text: string): unknown {
 }
 
 /** Process env layer for Claude: only the allowlisted variables are copied, never the whole environment. */
-function claudeEnvLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
+function claudeEnvLayer(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): Record<string, unknown> {
   const names = [...CLAUDE_SPECS.concurrency, ...CLAUDE_SPECS.depth].flatMap((spec) => spec.path[0] === "env" ? [spec.path[1]] : []);
   const picked: Record<string, unknown> = {};
-  for (const name of names) if (env[name] !== undefined) picked[name] = env[name];
+  for (const name of names) {
+    const value = getEnvValue(env, name, platform);
+    if (value !== undefined) picked[name] = value;
+  }
   return { env: picked };
 }
 
@@ -564,7 +583,7 @@ async function discover(
   const findings: Findings = { keys: new Set(), pluginDepths: {} };
   const files: string[] = [];
   const specs = specsFor(driver);
-  if (driver === "claude" && specs) applySpecs(claudeEnvLayer(opts.env), specs, findings, warnings);
+  if (driver === "claude" && specs) applySpecs(claudeEnvLayer(opts.env, opts.platform), specs, findings, warnings);
   for (const candidate of candidates) {
     const read = await readBoundedText(candidate, opts);
     if (read.kind === "missing") continue;
@@ -643,7 +662,7 @@ export async function discoverCliLimits(
   try {
     const candidates = candidatesFor(driver, harness, opts, warnings);
     cacheKey = JSON.stringify([driver, harness.profile ?? null, opts.cwd, opts.platform, opts.home, opts.systemRoot ?? null,
-      RELEVANT_ENV.map((name) => opts.env[name] ?? null)]);
+      RELEVANT_ENV.map((name) => envValue(opts, name) ?? null)]);
     const stalled = timeoutFallbacks.get(cacheKey);
     if (!opts.refresh && stalled && stalled.expiresAt > Date.now()) return structuredClone(stalled.limits);
     const key = cacheKey;

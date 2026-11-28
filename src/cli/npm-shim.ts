@@ -10,6 +10,16 @@ const QUOTED_SCRIPT = /["']([^"'\r\n]*?\.(?:c|m)?js)["']/gi;
 /** The directory variable npm's shims put in front of the script: `%dp0%`, `%~dp0`, `$basedir`, `${basedir}`, `$PSScriptRoot`. */
 const SHIM_DIR_VARIABLE = /^(?:%~?dp0%?|\$\{?basedir\}?|\$PSScriptRoot)/i;
 
+/** A PowerShell shim line that runs the program (`& "$basedir/node$exe" "$basedir/…/cli.js" $args`), as opposed to any string. */
+const POWERSHELL_INVOCATION_LINE = /&\s+["']?[^"'\r\n]*(?:node|\$\{?basedir\}?)/i;
+
+/** `REM ...`, `@REM ...` and `:: ...` lines of a batch file. */
+const BATCH_COMMENT_LINE = /^\s*@?(?:rem(?:\s|$)|::)/i;
+/** A PowerShell `<# ... #>` block comment, which may span lines; an unterminated one runs to the end of the file. */
+const POWERSHELL_BLOCK_COMMENT = /<#[\s\S]*?(?:#>|$)/g;
+const HASH_COMMENT_LINE = /^\s*#/;
+const BATCH_EXTENSIONS = new Set([".cmd", ".bat"]);
+
 const forwardSlashes = (path: string): string => path.replace(/\\/g, "/");
 
 /** `realpath` of an existing file, or undefined when it is missing or cannot be resolved. */
@@ -24,6 +34,19 @@ function isSmallFile(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The shim without its comment lines, so a comment that happens to mention a script (`REM wrapper for unused.js`) can
+ * never be taken for the script the shim runs. The shebang line of a POSIX shim is a comment too, and it holds no script.
+ */
+function withoutCommentLines(content: string, extension: string): string {
+  if (extension === ".ps1") content = content.replace(POWERSHELL_BLOCK_COMMENT, "");
+  const comment = BATCH_EXTENSIONS.has(extension) ? BATCH_COMMENT_LINE : HASH_COMMENT_LINE;
+  const lines = content.split(/\r?\n/).filter((line) => !comment.test(line));
+  // A .ps1 shim holds other JavaScript-looking strings (a comment-free `$ExecutionContext` check, a log path); only the
+  // lines that actually invoke the program name its script.
+  return (extension === ".ps1" ? lines.filter((line) => POWERSHELL_INVOCATION_LINE.test(line)) : lines).join("\n");
 }
 
 /** The script path a shim line points at, resolved against the shim's directory; foreign drive paths stay as written. */
@@ -47,7 +70,7 @@ export function readNpmShimTarget(file: string): string | undefined {
   let content: string;
   try { content = readFileSync(file, "utf8"); } catch { return undefined; }
   if (extension === "" && !POSIX_SHEBANG.test(content)) return undefined;
-  for (const [, candidate] of content.matchAll(QUOTED_SCRIPT)) {
+  for (const [, candidate] of withoutCommentLines(content, extension).matchAll(QUOTED_SCRIPT)) {
     const target = shimScriptPath(candidate, dirname(file));
     if (target !== undefined) return target;
   }

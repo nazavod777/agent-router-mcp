@@ -1,10 +1,11 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DRIVER_KINDS, DRIVER_METADATA, type DriverKind } from "../drivers.js";
 import { resolveBinary } from "../adapters/probe-utils.js";
+import { getEnvValue } from "../runtime/guard.js";
 import type { JsonValue } from "./jsonc-edit.js";
 import { CLI_NAME } from "./name.js";
 import { realIfExists, resolveLauncherEntry } from "./npm-shim.js";
@@ -45,7 +46,9 @@ export function preferStableNodePath(execPath: string, pathResolver: (binary: st
 export function createInstallContext(overrides: Partial<InstallContext> = {}): InstallContext {
   const env = overrides.env ?? process.env;
   const platform = overrides.platform ?? process.platform;
-  const pathResolver = overrides.pathResolver ?? ((binary: string) => resolveBinary(binary, { platform, pathEnv: env.PATH, pathExt: env.PATHEXT }));
+  const pathResolver = overrides.pathResolver ?? ((binary: string) => resolveBinary(binary, {
+    platform, pathEnv: getEnvValue(env, "PATH", platform), pathExt: getEnvValue(env, "PATHEXT", platform),
+  }));
   return {
     homeDir: homedir(),
     env,
@@ -78,12 +81,16 @@ export interface ClientLayout {
   detectDirs: string[];
   /** Entries of `rootDir` that belong to other tools and must not count as proof. */
   ignoredRootEntries: string[];
+  /** Instances only: the profile directory that must contain `rootDir` after symlinks are resolved. */
+  containerDir?: string;
 }
 
 export interface ClientSpec {
   id: ClientId;
   label: string;
   binary: string;
+  /** Extra, independently configured copies of this client (for example T3 Code's isolated Antigravity profiles). */
+  instances?(ctx: InstallContext): Promise<ClientTarget[]>;
   /** Included in `agrmcp skill install --target all` even when not detected. */
   core: boolean;
   format: ConfigFormat;
@@ -98,8 +105,37 @@ export interface ClientSpec {
   binaryNeedsConfigDir?: boolean;
 }
 
+/** One configurable location of a client: the primary one, or a named instance (`antigravity:t3:<short>`). */
+export interface ClientTarget {
+  spec: ClientSpec;
+  layout: ClientLayout;
+  /** Set for extra instances only; absent on the primary target so primary output never changes. */
+  instance?: string;
+  /** `spec.id` for the primary target, `<spec.id>:<instance>` for an instance. */
+  targetId: string;
+}
+
+export function primaryTarget(spec: ClientSpec, ctx: InstallContext): ClientTarget {
+  return { spec, layout: spec.layout(ctx), targetId: spec.id };
+}
+
+/** Accepts a bare spec (primary location) or an already resolved target, so older callers keep working. */
+export function toTarget(input: ClientSpec | ClientTarget, ctx: InstallContext): ClientTarget {
+  return "targetId" in input ? input : primaryTarget(input, ctx);
+}
+
+/** The primary target followed by every instance the client has on this machine. */
+export async function expandClientTargets(spec: ClientSpec, ctx: InstallContext): Promise<ClientTarget[]> {
+  return [primaryTarget(spec, ctx), ...(spec.instances ? await spec.instances(ctx) : [])];
+}
+
+/** Name shown to humans and accepted by `--target`: `antigravity` or `antigravity:t3:<short>`. */
+export function targetDisplayId(entry: { client: string; instance?: string }): string {
+  return entry.instance === undefined ? entry.client : `${entry.client}:${entry.instance}`;
+}
+
 function envDir(ctx: InstallContext, name: string): string | undefined {
-  const value = ctx.env[name];
+  const value = getEnvValue(ctx.env, name, ctx.platform);
   return value ? resolve(ctx.cwd, value) : undefined;
 }
 
@@ -126,7 +162,8 @@ function opencodeLayout(ctx: InstallContext): ClientLayout {
   const explicit = envDir(ctx, "OPENCODE_CONFIG");
   const isFile = (path: string) => { try { return statSync(path).isFile(); } catch { return false; } };
   const candidates = OPENCODE_FILES.map((name) => join(root, name));
-  const configPath = explicit && isFile(explicit) ? explicit : candidates.find(isFile) ?? candidates[0];
+  // An explicit OPENCODE_CONFIG is where OpenCode reads its config, so that is where we write, even before the file exists.
+  const configPath = explicit ?? candidates.find(isFile) ?? candidates[0];
   return { ...simpleLayout(root, "opencode.json"), configPath, detectFiles: [...(explicit ? [explicit] : []), ...candidates] };
 }
 
@@ -146,7 +183,7 @@ function isObject(value: unknown): value is { [key: string]: JsonValue } {
 }
 
 function antigravityLayout(ctx: InstallContext): ClientLayout {
-  const gemini = join(ctx.homeDir, ".gemini");
+  const gemini = envDir(ctx, "GEMINI_HOME") ?? join(ctx.homeDir, ".gemini");
   const modern = join(gemini, "config");
   const legacy = join(gemini, "antigravity");
   const useLegacy = existsSync(join(legacy, "mcp_config.json")) && !existsSync(join(modern, "mcp_config.json"));
@@ -155,6 +192,243 @@ function antigravityLayout(ctx: InstallContext): ClientLayout {
     detectFiles: [join(modern, "mcp_config.json"), join(legacy, "mcp_config.json")],
     detectDirs: [modern, legacy],
   });
+}
+
+const T3_PROFILE_NAME = /^[A-Za-z0-9._-]{1,128}$/;
+/** Raw directory entries examined, so empty or invalid directories cannot hide valid profiles behind the profile cap. */
+const MAX_T3_SCAN_ENTRIES = 256;
+const MAX_T3_PROFILES = 32;
+const T3_SHORT_LENGTH = 12;
+export const PRIMARY_INSTANCE = "primary";
+
+/** Comparison key of a path: Windows paths differ only by case. */
+function pathKey(path: string, platform: NodeJS.Platform): string {
+  return platform === "win32" ? path.toLowerCase() : path;
+}
+
+/** Real path of `file` when it exists, else its real parent plus the file name; undefined when neither can be resolved. */
+function canonicalConfigPath(file: string): string | undefined {
+  try { return realpathSync(file); } catch { /* fall through to the parent */ }
+  try { return join(realpathSync(dirname(file)), basename(file)); } catch { return undefined; }
+}
+
+function isInsideRoot(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/** Names of the real (non-symlink) profile directories among the first `MAX_T3_SCAN_ENTRIES` entries below `root`, in a stable order; the profile cap applies later, to profiles that hold a usable config. */
+async function t3ProfileDirectories(root: string): Promise<string[]> {
+  let rootReal: string;
+  let entries: string[];
+  try {
+    rootReal = realpathSync(root);
+    entries = await readdir(root);
+  } catch {
+    return [];
+  }
+  const valid: string[] = [];
+  for (const name of entries.sort().slice(0, MAX_T3_SCAN_ENTRIES)) {
+    if (name === "." || name === ".." || !T3_PROFILE_NAME.test(name)) continue;
+    try {
+      const info = lstatSync(join(root, name));
+      if (info.isSymbolicLink() || !info.isDirectory()) continue;
+      if (!isInsideRoot(rootReal, realpathSync(join(root, name)))) continue;
+    } catch {
+      continue;
+    }
+    valid.push(name);
+  }
+  return valid;
+}
+
+/** Fixed prefix of each name; it grows only for names that would otherwise share the same id, so ids stay stable. */
+function shortProfileIds(names: readonly string[]): Map<string, string> {
+  const ids = new Map<string, string>();
+  for (const name of names) {
+    let length = T3_SHORT_LENGTH;
+    while (names.some((other) => other !== name && other.slice(0, length) === name.slice(0, length))) length += 1;
+    ids.set(name, name.slice(0, length));
+  }
+  return ids;
+}
+
+/**
+ * A profile counts when its `config` directory is a real directory inside it and holds an MCP config or other own content
+ * (a symlinked `skills` folder is not own content). An `mcp_config.json` that is a symlink is never trusted: writing
+ * through it could reach any file.
+ */
+async function t3ProfileConfig(profileDir: string): Promise<string | undefined> {
+  const configDir = join(profileDir, "config");
+  const configFile = join(configDir, "mcp_config.json");
+  try {
+    if (!lstatSync(configDir).isDirectory()) return undefined;
+    const configReal = realpathSync(configDir);
+    if (!isInsideRoot(realpathSync(profileDir), configReal)) return undefined;
+    let fileInfo: ReturnType<typeof lstatSync> | undefined;
+    try { fileInfo = lstatSync(configFile); } catch { fileInfo = undefined; }
+    if (fileInfo !== undefined) {
+      if (fileInfo.isSymbolicLink()) return undefined;
+      if (!isInsideRoot(configReal, canonicalConfigPath(configFile) ?? "")) return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return existsSync(configFile) || await hasOwnContent(configDir, ["skills"]) ? configDir : undefined;
+}
+
+/**
+ * T3 Code keeps an isolated Antigravity profile per account under `<T3_HOME>/userdata/providers/antigravity/<profile>/config`.
+ * Only real directories directly below that root count; a profile that resolves to the primary's (or an earlier instance's)
+ * config file and skills folder is skipped, so `GEMINI_HOME` pointing into a profile never yields the same files twice.
+ */
+/** The T3 Code directory that holds one isolated Antigravity profile per account. */
+function t3AntigravityRoot(ctx: InstallContext): string {
+  return join(envDir(ctx, "T3_HOME") ?? join(ctx.homeDir, ".t3"), "userdata", "providers", "antigravity");
+}
+
+async function antigravityInstances(ctx: InstallContext): Promise<ClientTarget[]> {
+  const root = t3AntigravityRoot(ctx);
+  const names = await t3ProfileDirectories(root);
+  if (names.length === 0) return [];
+  const spec = CLIENTS.antigravity;
+  const found: Array<{ name: string; profileDir: string; layout: ClientLayout }> = [];
+  for (const name of names) {
+    const profileDir = join(root, name);
+    const configDir = await t3ProfileConfig(profileDir);
+    if (configDir !== undefined) {
+      if (found.length >= MAX_T3_PROFILES) break;
+      found.push({ name, profileDir, layout: simpleLayout(configDir, "mcp_config.json", { ignoredRootEntries: ["skills"], containerDir: profileDir }) });
+    }
+  }
+  const ids = shortProfileIds(found.map((entry) => entry.name));
+  const seen = new Set<string>();
+  const keyOf = (layout: ClientLayout): string | undefined => {
+    const config = canonicalConfigPath(layout.configPath);
+    const skills = canonicalConfigPath(layout.skillDir);
+    return config === undefined ? undefined : `${pathKey(config, ctx.platform)}\0${pathKey(skills ?? "", ctx.platform)}`;
+  };
+  const primaryKey = keyOf(antigravityLayout(ctx));
+  if (primaryKey !== undefined) seen.add(primaryKey);
+  const targets: ClientTarget[] = [];
+  for (const { name, layout } of found) {
+    // Only a profile whose config file AND skills folder both repeat an earlier location is a duplicate.
+    const key = keyOf(layout);
+    if (key !== undefined) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    const instance = `t3:${ids.get(name)}`;
+    targets.push({ spec, layout, instance, targetId: `${spec.id}:${instance}` });
+  }
+  return targets;
+}
+
+/** The shared Antigravity skills folders a T3 profile may legitimately link its own `skills` to. */
+function trustedSharedSkillsDirs(ctx: InstallContext): string[] {
+  const base = envDir(ctx, "GEMINI_HOME") ?? join(ctx.homeDir, ".gemini");
+  return [...new Set([join(base, "config", "skills"), join(ctx.homeDir, ".gemini", "config", "skills"), join(antigravityLayout(ctx).rootDir, "skills")])];
+}
+
+function lstatOrUndefined(path: string): ReturnType<typeof lstatSync> | undefined {
+  try { return lstatSync(path); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") return undefined;
+    throw error;
+  }
+}
+
+function realOrUndefined(path: string): string | undefined {
+  try { return realpathSync(path); } catch { return undefined; }
+}
+
+/** `path` is `root` itself or lies inside it. */
+function isWithin(root: string, path: string): boolean {
+  return path === root || isInsideRoot(root, path);
+}
+
+function refuseInstance(target: ClientTarget, what: string): never {
+  throw new Error(`refusing to write for ${target.targetId}: ${what}`);
+}
+
+/**
+ * The layout whose writes must stay inside a profile: an instance's own layout, or the primary Antigravity layout when
+ * `GEMINI_HOME` points into a T3 Code profile (the profile directory then becomes the container). Undefined: unchecked.
+ */
+function guardedLayout(target: ClientTarget, ctx: InstallContext | undefined): ClientLayout | undefined {
+  if (target.instance !== undefined) return target.layout;
+  if (ctx === undefined || target.spec.id !== "antigravity") return undefined;
+  const t3Root = t3AntigravityRoot(ctx);
+  const t3Real = realOrUndefined(t3Root);
+  for (const [root, rootDir] of [[resolve(t3Root), resolve(target.layout.rootDir)], ...(t3Real === undefined ? [] : [[t3Real, realOrUndefined(target.layout.rootDir) ?? ""]])]) {
+    if (!isInsideRoot(root, rootDir)) continue;
+    const profile = relative(root, rootDir).split(/[\\/]/)[0];
+    return { ...target.layout, containerDir: join(root, profile) };
+  }
+  return undefined;
+}
+
+/**
+ * Instance writes stay inside the profile: the profile's config directory must still be a real directory inside the
+ * profile, and `mcp_config.json` must not be a symlink. Throws before anything is written; a primary target is unchecked.
+ */
+export function assertInstanceConfigWritable(target: ClientTarget, ctx?: InstallContext): void {
+  const layout = guardedLayout(target, ctx);
+  if (layout === undefined) return;
+  const rootInfo = lstatOrUndefined(layout.rootDir);
+  if (rootInfo === undefined) return; // not created yet: the parent was validated when the profile was discovered
+  const rootReal = realOrUndefined(layout.rootDir);
+  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory() || rootReal === undefined) refuseInstance(target, `${layout.rootDir} is not a real directory.`);
+  const container = layout.containerDir === undefined ? undefined : realOrUndefined(layout.containerDir);
+  if (layout.containerDir !== undefined && (container === undefined || !isInsideRoot(container, rootReal))) {
+    refuseInstance(target, `${layout.rootDir} resolves outside its profile.`);
+  }
+  if (ctx !== undefined && container !== undefined) {
+    // Re-checked right before writing: the profile directory itself must still lie inside the real T3 root.
+    const t3Real = realOrUndefined(t3AntigravityRoot(ctx));
+    if (t3Real === undefined || !isInsideRoot(t3Real, container)) refuseInstance(target, `${layout.containerDir} resolves outside the T3 Code profiles folder.`);
+  }
+  const file = lstatOrUndefined(layout.configPath);
+  if (file === undefined) return;
+  if (file.isSymbolicLink()) refuseInstance(target, `${layout.configPath} is a symbolic link.`);
+  const fileReal = realOrUndefined(layout.configPath);
+  if (fileReal === undefined || !isInsideRoot(rootReal, fileReal)) refuseInstance(target, `${layout.configPath} resolves outside ${layout.rootDir}.`);
+}
+
+/**
+ * The profile's `skills` folder must be a real directory inside the profile, or a link to the primary Antigravity's shared
+ * skills folder and nothing else (a dangling or foreign link is refused); `skills/orchestrate` and its `SKILL.md` must not
+ * be symlinks that leave the allowed skills folder. Throws before the skill is written; a primary target is unchecked.
+ */
+export function assertInstanceSkillWritable(target: ClientTarget, ctx: InstallContext): void {
+  const layout = guardedLayout(target, ctx);
+  if (layout === undefined) return;
+  assertInstanceConfigWritable(target, ctx);
+  const rootReal = realOrUndefined(layout.rootDir);
+  if (rootReal === undefined) return;
+  const skillsDir = dirname(layout.skillDir);
+  const skillsInfo = lstatOrUndefined(skillsDir);
+  if (skillsInfo === undefined) return;
+  let allowedRoot: string;
+  const skillsReal = realOrUndefined(skillsDir);
+  if (skillsInfo.isSymbolicLink()) {
+    const trusted = trustedSharedSkillsDirs(ctx).map(realOrUndefined);
+    if (skillsReal === undefined || !trusted.some((dir) => dir !== undefined && pathKey(dir, ctx.platform) === pathKey(skillsReal, ctx.platform))) {
+      refuseInstance(target, `${skillsDir} is a link that does not lead to the shared Antigravity skills folder.`);
+    }
+    allowedRoot = skillsReal;
+  } else {
+    if (!skillsInfo.isDirectory() || skillsReal === undefined || !isInsideRoot(rootReal, skillsReal)) refuseInstance(target, `${skillsDir} is not a real directory inside the profile.`);
+    allowedRoot = skillsReal;
+  }
+  for (const path of [layout.skillDir, join(layout.skillDir, "SKILL.md")]) {
+    const info = lstatOrUndefined(path);
+    if (info === undefined) continue;
+    const real = realOrUndefined(path);
+    if (info.isSymbolicLink() && (real === undefined || !isInsideRoot(allowedRoot, real))) {
+      refuseInstance(target, `${path} is a symbolic link that leaves the skills folder.`);
+    }
+    if (real !== undefined && !isWithin(allowedRoot, real)) refuseInstance(target, `${path} resolves outside the skills folder.`);
+  }
 }
 
 function kimiLayout(ctx: InstallContext): ClientLayout {
@@ -192,7 +466,7 @@ const CLIENT_SPECS: Record<ClientId, Omit<ClientSpec, "id" | "label" | "binary" 
     jsonEntry: mcpServersEntry,
   },
   antigravity: {
-    format: "json", layout: antigravityLayout,
+    format: "json", layout: antigravityLayout, instances: antigravityInstances,
     jsonEntryPath: () => ["mcpServers", SERVER_NAME], jsonEntry: mcpServersEntry,
   },
   opencode: {
@@ -218,7 +492,7 @@ const CLIENT_SPECS: Record<ClientId, Omit<ClientSpec, "id" | "label" | "binary" 
   },
   fx: {
     binaryNeedsConfigDir: true, // `fx` on PATH is usually Anton Medvedev's JSON viewer, not Vercel fx
-    format: "json", layout: (ctx) => simpleLayout(join(ctx.homeDir, ".fx"), "mcp.json"),
+    format: "json", layout: (ctx) => simpleLayout(rooted("FX_HOME", ".fx")(ctx), "mcp.json"),
     jsonEntryPath: () => ["mcpServers", SERVER_NAME], jsonEntry: (argv) => ({ type: "stdio", command: [...argv] }),
   },
   muse: {
@@ -237,7 +511,7 @@ const CLIENT_SPECS: Record<ClientId, Omit<ClientSpec, "id" | "label" | "binary" 
     jsonEntryPath: () => ["mcpServers", SERVER_NAME], jsonEntry: (argv) => ({ type: "stdio", ...command(argv) }),
   },
   qwen: {
-    format: "json", layout: (ctx) => simpleLayout(join(ctx.homeDir, ".qwen"), "settings.json"),
+    format: "json", layout: (ctx) => simpleLayout(rooted("QWEN_HOME", ".qwen")(ctx), "settings.json"),
     jsonEntryPath: () => ["mcpServers", SERVER_NAME], jsonEntry: mcpServersEntry,
   },
   kimi: {
@@ -297,13 +571,14 @@ async function hasOwnContent(directory: string, ignoredEntries: readonly string[
  * A client counts as present when its binary is on PATH or its config file/directory exists (a lone skill copy does not
  * count). A binary whose name collides with another tool (`binaryNeedsConfigDir`) is only evidence next to such config.
  */
-export async function detectClient(spec: ClientSpec, ctx: InstallContext): Promise<DetectionResult> {
-  const layout = spec.layout(ctx);
+export async function detectClient(input: ClientSpec | ClientTarget, ctx: InstallContext): Promise<DetectionResult> {
+  const { spec, layout, instance } = toTarget(input, ctx);
   const configReasons: string[] = [];
   for (const file of layout.detectFiles) if (existsSync(file)) configReasons.push(`config ${file}`);
   for (const directory of layout.detectDirs) if (await hasOwnContent(directory, layout.ignoredRootEntries)) configReasons.push(`directory ${directory}`);
   if (await hasOwnContent(layout.rootDir, layout.ignoredRootEntries)) configReasons.push(`directory ${layout.rootDir}`);
-  const binary = ctx.pathResolver(spec.binary);
+  // An instance is its own profile: the client's binary on PATH says nothing about it.
+  const binary = instance === undefined ? ctx.pathResolver(spec.binary) : undefined;
   const binaryCounts = binary !== undefined && (!spec.binaryNeedsConfigDir || configReasons.length > 0);
   const reasons = [...(binaryCounts ? [`binary ${binary}`] : []), ...configReasons];
   return { detected: reasons.length > 0, reasons: [...new Set(reasons)] };
@@ -327,8 +602,16 @@ function realOrResolved(path: string): string {
   try { return realpathSync(path); } catch { return resolve(path); }
 }
 
-function sameFile(left: string, right: string): boolean {
-  return resolve(left) === resolve(right) || realOrResolved(left) === realOrResolved(right);
+function sameFile(left: string, right: string, platform: NodeJS.Platform = process.platform): boolean {
+  const same = (a: string, b: string) => pathKey(a, platform) === pathKey(b, platform);
+  return same(resolve(left), resolve(right)) || same(realOrResolved(left), realOrResolved(right));
+}
+
+/** On Windows only a drive path (`C:\x`) or a UNC path (`\\server\share`) is fully qualified; `\x` depends on the current drive. */
+const WINDOWS_FULLY_QUALIFIED = /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/;
+
+function isAbsoluteFor(ctx: InstallContext, path: string): boolean {
+  return ctx.platform === "win32" ? WINDOWS_FULLY_QUALIFIED.test(path) : isAbsolute(path);
 }
 
 function stripExtension(name: string): string {
@@ -375,7 +658,7 @@ function launcherLeadsToThisPackage(command: string, ctx: InstallContext | undef
   if (resolved === undefined || OPAQUE_LAUNCHER.test(resolved)) return true;
   const entry = resolveLauncherEntry(resolved);
   if (entry === undefined || OPAQUE_LAUNCHER.test(entry)) return true;
-  if (ctx && sameFile(entry, ctx.entryPath)) return true;
+  if (ctx && sameFile(entry, ctx.entryPath, ctx.platform)) return true;
   return BUILD_ENTRY.test(posixish(entry)) && (packageNameAbove(entry) ?? PACKAGE_NAME) === PACKAGE_NAME;
 }
 
@@ -449,10 +732,11 @@ export function isCurrent(argv: readonly string[], ctx: InstallContext, options:
   const entryReal = realIfExists(ctx.entryPath);
   if (entryReal === undefined && !options.assumeEntryExists) return false;
   const [first, second, third] = argv;
-  if (argv.length === 3 && sameFile(first, ctx.nodePath) && sameFile(second, ctx.entryPath) && third === "mcp") return true;
+  // A relative node or script path resolves against whatever directory the client starts in, so it is never this build.
+  if (argv.length === 3 && isAbsoluteFor(ctx, first) && isAbsoluteFor(ctx, second) && sameFile(first, ctx.nodePath, ctx.platform) && sameFile(second, ctx.entryPath, ctx.platform) && third === "mcp") return true;
   if (argv.length === 2 && second === "mcp" && launcherName(posixish(first)) === CLI_NAME) {
     const resolved = resolveLauncher(first, ctx);
-    return resolved !== undefined && entryReal !== undefined && resolveLauncherEntry(resolved) === entryReal;
+    return resolved !== undefined && entryReal !== undefined && pathKey(resolveLauncherEntry(resolved) ?? "", ctx.platform) === pathKey(entryReal, ctx.platform);
   }
   return false;
 }

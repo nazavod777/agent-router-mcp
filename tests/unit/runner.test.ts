@@ -337,6 +337,8 @@ describe("OrchestratorRunner", () => {
     maxTotalQueued?: number;
     /** Written to the user config file as is, instead of a `[defaults]` table. */
     rawConfig?: string;
+    /** Platform whose command-line length limit the runner enforces before spawning. */
+    platform?: NodeJS.Platform;
   } = {}): Promise<void> {
     await writeFile(configPath, options.rawConfig ?? `[defaults]\n${options.defaults ?? ""}\n`);
     const adapter: CliAdapter = {
@@ -389,6 +391,7 @@ describe("OrchestratorRunner", () => {
       terminateGraceMs: 80,
       postTerminationDrainMs: options.postTerminationDrainMs,
       maxTotalQueued: options.maxTotalQueued,
+      platform: options.platform,
       // Never read the developer's real CLI configs; an uncached read lets tests edit files between runs.
       cliLimits: { home: join(root, "home"), cacheTtlMs: 0 },
     });
@@ -427,6 +430,40 @@ describe("OrchestratorRunner", () => {
     }
     return current;
   }
+
+  it("records the spawn time and hands it to the process-tree cleanup of a job that finished normally", async () => {
+    await configure();
+    const terminate = vi.spyOn(processTree, "terminateProcessTree");
+    const before = Date.now();
+    const result = await runner.run(runRequest);
+    expect(result).toMatchObject({ status: "completed", result: { exit_code: 0 } });
+    expect(result.error).toBeUndefined();
+    expect(terminate).toHaveBeenCalled();
+    for (const [options] of terminate.mock.calls) {
+      expect(options.spawnedAt).toBeGreaterThanOrEqual(before);
+      expect(options.spawnedAt).toBeLessThanOrEqual(Date.now());
+    }
+    terminate.mockRestore();
+  });
+
+  it("refuses to spawn when the final expanded command line exceeds the Windows limit, whichever driver built it", async () => {
+    await configure({
+      platform: "win32",
+      // The launcher's own prefix arguments count too: `command + prefixArgs + args` is what CreateProcess receives.
+      build: (input) => ({ args: ["-e", ...["x".repeat(20_000), "y".repeat(20_000)], input.prompt] }),
+    });
+    const failed = await runner.run(runRequest);
+    expect(failed).toMatchObject({
+      status: "failed", error: { code: "PROMPT_TOO_LARGE", retryable: false, details: { limit_chars: 32_766 } },
+    });
+    expect(failed.pid).toBeUndefined();
+    expect(finishInputs).toHaveLength(0);
+  });
+
+  it("does not apply the Windows command-line limit on other platforms", async () => {
+    await configure({ platform: "linux", build: (input) => ({ args: ["-e", input.prompt, "x".repeat(40_000)] }) });
+    await expect(runner.run(runRequest)).resolves.toMatchObject({ status: "completed" });
+  });
 
   it("resolves aliases, rejects unsupported effort and preserves private result files", async () => {
     await configure();
@@ -2626,6 +2663,45 @@ describe("OrchestratorRunner", () => {
     } finally {
       cleanup.mockRestore();
     }
+  });
+
+  describe("an unreadable Windows process table after the CLI ended", () => {
+    const UNREADABLE_TABLE = {
+      signalSent: "SIGTERM", terminated: false, reason: "The process table could not be read.", processTableUnavailable: true,
+    } as const;
+    const POISON_WARNING = "could not terminate its process tree";
+
+    it("only warns after a clean self-exit and leaves the checkout usable", async () => {
+      await configure();
+      const cwd = await createRepo();
+      const terminate = vi.spyOn(processTree, "terminateProcessTree").mockResolvedValue(UNREADABLE_TABLE);
+      try {
+        const job = await runner.run({ ...runRequest, cwd, mode: "write", isolation: "shared" });
+        expect(job.status).toBe("completed");
+        expect(job.warnings.join(" ")).toContain("Could not verify that the process tree ended after a clean exit");
+        expect(job.warnings.join(" ")).not.toContain("Could not terminate the process tree");
+        expect(terminate).toHaveBeenCalledWith(expect.objectContaining({ rootExited: true }));
+        const next = await runner.run({ ...runRequest, cwd, mode: "write", isolation: "shared" });
+        expect(next.warnings.join(" ")).not.toContain(POISON_WARNING);
+      } finally {
+        terminate.mockRestore();
+      }
+    }, 15_000);
+
+    it("keeps poisoning shared writes after a timeout, where children may well still be running", async () => {
+      await configure();
+      const cwd = await createRepo();
+      const terminate = vi.spyOn(processTree, "terminateProcessTree").mockResolvedValue(UNREADABLE_TABLE);
+      try {
+        const job = await runner.run({ ...runRequest, cwd, mode: "write", isolation: "shared", prompt: "setTimeout(() => {}, 1_300)", timeout_sec: 1 });
+        expect(job.status).toBe("timed_out");
+        expect(job.warnings.join(" ")).toContain("Could not terminate the process tree");
+        const next = await runner.run({ ...runRequest, cwd, mode: "write", isolation: "shared" });
+        expect(next.warnings.join(" ")).toContain(POISON_WARNING);
+      } finally {
+        terminate.mockRestore();
+      }
+    }, 15_000);
   });
 
   describe("a shared checkout whose process tree could not be terminated", () => {

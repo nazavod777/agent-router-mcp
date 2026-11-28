@@ -1,12 +1,13 @@
-import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { nodeToValue, parseJsonc } from "../cli/jsonc-edit.js";
 import type { HarnessConfig } from "../config/schema.js";
 import { DRIVER_METADATA } from "../drivers.js";
 import type { ProgressTracker } from "../runtime/checkpoint.js";
+import { getEnvValue } from "../runtime/guard.js";
 import { assertSandboxExtraArgs, createNdjsonParser, outputModeFor, versionAtLeast } from "./parsers.js";
-import { asNumber, asString, compactUsage, execProbe, healthNow, isObject, mapEffortWith, PARSER_BUFFER_LIMIT_BYTES, probeBinaryAndVersion, requireLaunch, safeToolTarget, safeToolVariant, tryParseJson } from "./probe-utils.js";
+import { adapterError, asNumber, asString, compactUsage, execProbe, healthNow, isExplicitEffort, isObject, mapEffortWith, PARSER_BUFFER_LIMIT_BYTES, probeBinaryAndVersion, readOptionalConfigText, requireLaunch, safeToolTarget, safeToolVariant } from "./probe-utils.js";
 import type { BuildInvocationInput, BuiltInvocation, CliAdapter } from "./types.js";
 
 const LABEL = DRIVER_METADATA.opencode.label;
@@ -19,65 +20,149 @@ const permissions = [
 const MAX_OPENCODE_CONFIG_BYTES = 1024 * 1024;
 const MAX_DISABLED_MCP_SERVERS = 64;
 const CONFIG_FILE_NAMES = ["opencode.json", "opencode.jsonc", "config.json"] as const;
-const PROJECT_CONFIG_FILE_NAMES = ["opencode.json", "opencode.jsonc"] as const;
+/** Per project directory: the config next to the code and the one in its `.opencode/` folder. */
+const PROJECT_CONFIG_FILES = [
+  ["opencode.json"], ["opencode.jsonc"], [".opencode", "opencode.json"], [".opencode", "opencode.jsonc"],
+] as const;
+/** Parent directories searched above the working directory, so a nested folder still sees its project's config. */
+const MAX_PROJECT_ANCESTORS = 64;
 
-/** Removes `//` and `/* *\/` comments (outside strings) and trailing commas so JSONC parses as JSON. */
-function stripJsonc(text: string): string {
-  let out = "";
-  let inString = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index];
-    const next = text[index + 1];
-    if (inString) {
-      out += char;
-      if (char === "\\") { out += next ?? ""; index += 1; } else if (char === '"') inString = false;
-    } else if (char === '"') {
-      inString = true;
-      out += char;
-    } else if (char === "/" && next === "/") {
-      while (index < text.length && text[index] !== "\n") index += 1;
-      out += "\n";
-    } else if (char === "/" && next === "*") {
-      const end = text.indexOf("*/", index + 2);
-      index = end < 0 ? text.length : end + 1;
-    } else out += char;
+/**
+ * Project config candidates from `cwd` up to the git root (inclusive); without a git root the walk ends at the home
+ * directory or the file system root. Bounded and deduplicated by resolved path.
+ */
+function projectConfigPaths(cwd: string, home: string): string[] {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  const homeDir = resolve(home);
+  let dir = resolve(cwd);
+  for (let level = 0; level <= MAX_PROJECT_ANCESTORS; level += 1) {
+    for (const parts of PROJECT_CONFIG_FILES) {
+      const path = join(dir, ...parts);
+      if (!seen.has(path)) { seen.add(path); paths.push(path); }
+    }
+    const parent = dirname(dir);
+    if (existsSync(join(dir, ".git")) || dir === homeDir || parent === dir) return paths;
+    dir = parent;
   }
-  return out.replace(/,(\s*[}\]])/g, "$1");
+  // Fail closed: a git-root config above this depth would otherwise be skipped silently.
+  throw refuseMcpConfig(dir, "exceeds the maximum directory depth while searching for project configs");
 }
 
-async function readMcpNames(path: string): Promise<string[]> {
-  let file;
+/** MCP servers of one OpenCode config: V1 keeps them directly under `mcp.<name>`, V2 under `mcp.servers.<name>`. */
+export interface ConfiguredMcpServers {
+  v1: string[];
+  v2: string[];
+}
+
+function mcpServersOf(config: Record<string, unknown>): ConfiguredMcpServers {
+  const mcp = isObject(config.mcp) ? config.mcp : {};
+  const servers = isObject(mcp.servers) ? mcp.servers : undefined;
+  return {
+    v1: Object.keys(mcp).filter((name) => !(servers !== undefined && name === "servers")),
+    v2: servers ? Object.keys(servers) : [],
+  };
+}
+
+/**
+ * Parses JSONC (comments, trailing commas) with the strict offset-tracking parser, so commas and comment markers inside
+ * string literals are never touched and an unterminated block comment fails. A blank document is an empty config.
+ * Undefined when it is not a JSON object.
+ */
+function parseJsoncObject(text: string): Record<string, unknown> | undefined {
+  if (!text.trim()) return {};
   try {
-    file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
-    const info = await file.stat();
-    if (!info.isFile() || info.size > MAX_OPENCODE_CONFIG_BYTES) return [];
-    const buffer = Buffer.alloc(info.size);
-    const { bytesRead } = await file.read(buffer, 0, info.size, 0);
-    const config = tryParseJson(stripJsonc(buffer.toString("utf8", 0, bytesRead)));
-    return isObject(config) && isObject(config.mcp) ? Object.keys(config.mcp) : [];
+    const parsed: unknown = nodeToValue(parseJsonc(text));
+    return isObject(parsed) ? parsed : undefined;
   } catch {
-    return [];
-  } finally {
-    await file?.close();
+    return undefined;
   }
 }
 
 /**
- * Names of the MCP servers the user's OpenCode configuration defines (global config directory, `OPENCODE_CONFIG`, and the
- * project's own config), bounded. An unreadable or invalid file contributes none.
+ * Reads one existing config file for its MCP servers. A missing file contributes none; a file that cannot be read safely
+ * (not a regular file, oversized, unreadable, invalid JSONC) fails closed: switching MCP off would otherwise silently
+ * leave its servers running. The parser's own message is never quoted, since it may echo file content.
  */
+async function readMcpServers(path: string): Promise<ConfiguredMcpServers> {
+  let text: string | undefined;
+  try {
+    text = await readOptionalConfigText(path, MAX_OPENCODE_CONFIG_BYTES);
+  } catch (error) {
+    // A parent that is a file (not a directory) holds no config either.
+    if ((error as NodeJS.ErrnoException).code === "ENOTDIR") return { v1: [], v2: [] };
+    throw refuseMcpConfig(path, `could not be read safely (${error instanceof Error ? error.message : "unknown error"})`);
+  }
+  if (text === undefined) return { v1: [], v2: [] };
+  const config = parseJsoncObject(text);
+  if (config === undefined) throw refuseMcpConfig(path, "is not a valid JSON or JSONC object");
+  return mcpServersOf(config);
+}
+
+function refuseMcpConfig(path: string, reason: string) {
+  return adapterError("SANDBOX_POLICY_VIOLATION",
+    `MCP servers must be switched off, but the OpenCode config ${path} ${reason}, so its MCP servers cannot all be disabled. ` +
+    `Repair the file (valid JSON or JSONC, under ${MAX_OPENCODE_CONFIG_BYTES} bytes, at most ${MAX_DISABLED_MCP_SERVERS} MCP servers) ` +
+    "or set inherit_mcp = true for this harness or run.", false);
+}
+
+/**
+ * MCP servers the user's OpenCode configuration defines (global config directory, `OPENCODE_CONFIG`, and the project's
+ * own config), split by schema generation. A missing file contributes none; an unreadable or invalid file, or more than
+ * `MAX_DISABLED_MCP_SERVERS` distinct servers, fails closed with SANDBOX_POLICY_VIOLATION.
+ */
+export async function readConfiguredMcpServers(
+  cwd: string, env: NodeJS.ProcessEnv = process.env, home: string = homedir(),
+): Promise<ConfiguredMcpServers> {
+  const configDir = getEnvValue(env, "OPENCODE_CONFIG_DIR");
+  const xdgHome = getEnvValue(env, "XDG_CONFIG_HOME");
+  const globalDir = configDir || join(xdgHome || join(home, ".config"), "opencode");
+  const explicitFile = getEnvValue(env, "OPENCODE_CONFIG");
+  const paths = [
+    ...CONFIG_FILE_NAMES.map((name) => join(globalDir, name)),
+    ...(explicitFile ? [resolve(cwd, explicitFile)] : []),
+    ...projectConfigPaths(cwd, home),
+  ];
+  const v1 = new Set<string>();
+  const v2 = new Set<string>();
+  for (const path of paths) {
+    const found = await readMcpServers(path);
+    found.v1.forEach((name) => v1.add(name));
+    found.v2.forEach((name) => v2.add(name));
+    const total = new Set([...v1, ...v2]).size;
+    if (total > MAX_DISABLED_MCP_SERVERS) throw refuseMcpConfig(path, `adds up to ${total} MCP servers`);
+  }
+  return { v1: [...v1], v2: [...v2] };
+}
+
+/** Names of all MCP servers (V1 and V2) the user's OpenCode configuration defines; see `readConfiguredMcpServers`. */
 export async function readConfiguredMcpServerNames(
   cwd: string, env: NodeJS.ProcessEnv = process.env, home: string = homedir(),
 ): Promise<string[]> {
-  const globalDir = env.OPENCODE_CONFIG_DIR || join(env.XDG_CONFIG_HOME || join(home, ".config"), "opencode");
-  const paths = [
-    ...CONFIG_FILE_NAMES.map((name) => join(globalDir, name)),
-    ...(env.OPENCODE_CONFIG ? [env.OPENCODE_CONFIG] : []),
-    ...PROJECT_CONFIG_FILE_NAMES.map((name) => join(cwd, name)),
-  ];
-  const names = new Set<string>();
-  for (const path of paths) for (const name of await readMcpNames(path)) names.add(name);
-  return [...names].slice(0, MAX_DISABLED_MCP_SERVERS);
+  const { v1, v2 } = await readConfiguredMcpServers(cwd, env, home);
+  return [...new Set([...v1, ...v2])];
+}
+
+const SECRET_KEY = /^(?:api[_-]?key|token)$/i;
+const MIN_SECRET_CHARS = 8;
+const MAX_SECRET_SCAN_DEPTH = 12;
+const MAX_INLINE_SECRETS = 64;
+/** `{env:NAME}` and `{file:path}` are references OpenCode resolves itself, not credentials. */
+const CONFIG_REFERENCE = /^\{(?:env|file):[^}]*\}$/;
+
+/** Inline credential strings (`apiKey`, `api_key`, `token`) of a parsed config, so the runner can redact them. */
+function inlineSecrets(value: unknown, found: Set<string> = new Set(), depth = 0): string[] {
+  if (depth > MAX_SECRET_SCAN_DEPTH || found.size >= MAX_INLINE_SECRETS) return [...found];
+  const children = Array.isArray(value) ? value.map((item) => [undefined, item] as const)
+    : isObject(value) ? Object.entries(value) : [];
+  for (const [key, child] of children) {
+    if (typeof child === "string" && key !== undefined && SECRET_KEY.test(key)) {
+      if (child.length >= MIN_SECRET_CHARS && !CONFIG_REFERENCE.test(child.trim())) found.add(child);
+    } else {
+      inlineSecrets(child, found, depth + 1);
+    }
+  }
+  return [...found];
 }
 
 const DEPTH_KEY = "subagent_depth";
@@ -106,42 +191,62 @@ function lowerDepth(existing: unknown, depth: number): number {
   return typeof existing === "number" && Number.isFinite(existing) && existing < depth ? existing : depth;
 }
 
-/** Builds the inline config: whatever the environment already carries is kept, only this job's agent and depth are set. */
+/**
+ * Entry of a server table switched off, keeping the entry's other fields. V1 uses `enabled: false`; V2 additionally
+ * carries `disabled: true`, so either schema generation turns the server off. Entries found only in user files start
+ * from an empty object: nothing (least of all credentials) is copied from those files into the inline config.
+ */
+function disabledEntry(table: Record<string, unknown>, name: string, v2: boolean): Record<string, unknown> {
+  return { ...(isObject(table[name]) ? table[name] : {}), enabled: false, ...(v2 ? { disabled: true } : {}) };
+}
+
+/**
+ * Turns every V1 (`mcp.<name>`) and V2 (`mcp.servers.<name>`) server of the inline config and of the user's files off.
+ * Inline entries keep their other fields; a V2 table is only written where one already exists or a V2 server was found,
+ * so a V1-only setup never gains a stray `servers` entry.
+ */
+function disableMcpServers(inlineMcp: Record<string, unknown>, disabled: ConfiguredMcpServers): Record<string, unknown> {
+  const inlineServers = isObject(inlineMcp.servers) ? inlineMcp.servers : undefined;
+  const inlineV1 = Object.fromEntries(Object.entries(inlineMcp).filter(([name]) => !(inlineServers !== undefined && name === "servers")));
+  const v1Names = new Set([...Object.keys(inlineV1), ...disabled.v1]);
+  const v2Names = new Set([...Object.keys(inlineServers ?? {}), ...disabled.v2]);
+  const mcp: Record<string, unknown> = Object.fromEntries([...v1Names].map((name) => [name, disabledEntry(inlineV1, name, false)]));
+  if (inlineServers !== undefined || v2Names.size > 0) {
+    mcp.servers = { ...inlineServers, ...Object.fromEntries([...v2Names].map((name) => [name, disabledEntry(inlineServers ?? {}, name, true)])) };
+  }
+  return mcp;
+}
+
+/**
+ * Builds the inline config: whatever the environment already carries (JSON or JSONC) is kept, only this job's agent and
+ * depth are set. Also returns the inline credentials found in it, which the runner must redact.
+ */
 function mergeInlineConfig(
   existingRaw: string | undefined,
   agentName: string,
   agent: Record<string, unknown>,
   limit: ReturnType<typeof nativeDepthLimit>,
   warnings: string[],
-  /** Names of user-configured MCP servers to switch off; undefined leaves MCP as the user configured it. */
-  disabledMcpServers?: readonly string[],
-): Record<string, unknown> {
+  /** MCP servers of the user's files to switch off; undefined leaves MCP as the user configured it. */
+  disabledMcpServers?: ConfiguredMcpServers,
+): { config: Record<string, unknown>; secrets: string[] } {
   let existing: Record<string, unknown> = {};
   if (existingRaw?.trim()) {
-    try {
-      const parsed: unknown = JSON.parse(existingRaw);
-      if (isObject(parsed)) existing = parsed;
-      else warnings.push("OPENCODE_CONFIG_CONTENT is not a JSON object; it was replaced for this job.");
-    } catch {
-      warnings.push("OPENCODE_CONFIG_CONTENT is not valid JSON; it was replaced for this job.");
-    }
+    const parsed = parseJsoncObject(existingRaw);
+    if (parsed) existing = parsed;
+    else warnings.push("OPENCODE_CONFIG_CONTENT is not valid JSON/JSONC (an object is required); it was replaced for this job.");
   }
   const merged: Record<string, unknown> = {
     ...existing,
     agents: { ...(isObject(existing.agents) ? existing.agents : {}), [agentName]: agent },
   };
-  if (disabledMcpServers) {
-    // Every server named by the inline config or the user's files is disabled; the inline entry keeps its other fields.
-    const inline = isObject(existing.mcp) ? existing.mcp : {};
-    const names = new Set([...Object.keys(inline), ...disabledMcpServers]);
-    merged.mcp = Object.fromEntries([...names].map((name) => [name, { ...(isObject(inline[name]) ? inline[name] : {}), enabled: false }]));
-  }
+  if (disabledMcpServers) merged.mcp = disableMcpServers(isObject(existing.mcp) ? existing.mcp : {}, disabledMcpServers);
   if (limit?.topLevel) merged[DEPTH_KEY] = lowerDepth(existing[DEPTH_KEY], limit.depth);
   if (limit?.experimental) {
     const experimental = isObject(existing.experimental) ? existing.experimental : {};
     merged.experimental = { ...experimental, [DEPTH_KEY]: lowerDepth(experimental[DEPTH_KEY], limit.depth) };
   }
-  return merged;
+  return { config: merged, secrets: inlineSecrets(existing) };
 }
 
 function addNumber(total: number | undefined, value: unknown): number | undefined {
@@ -209,7 +314,12 @@ export class OpenCodeAdapter implements CliAdapter {
     const nativeEffort = this.mapEffort(input.effort);
     const model = input.model.cli_model;
     const base = input.model.cli_provider ? `${input.model.cli_provider}/${model}` : model;
-    const variant = !["default", "none"].includes(nativeEffort) && input.model.efforts.length > 1;
+    // A variant the user already pinned in cli_model (`model#high`) is never overridden by a second `#<effort>`. A model
+    // that lists a single effort, which is also its default, has no variant to choose, so none is appended; an effort
+    // that differs from that default is an explicit choice and is honored.
+    const defaultNative = this.mapEffort(input.model.default_effort);
+    const variant = !base.includes("#") && isExplicitEffort(nativeEffort) && nativeEffort !== "none"
+      && (input.model.efforts.length > 1 || nativeEffort !== defaultNative);
     const args = ["run", "--standalone", "--format", "json", "--model", variant ? `${base}#${nativeEffort}` : base];
     const readonly = input.mode === "readonly";
     const name = readonly ? "orch-readonly" : "orch-write";
@@ -228,11 +338,14 @@ export class OpenCodeAdapter implements CliAdapter {
       warnings.push("OpenCode write mode runs without an OS filesystem sandbox (unsandboxed). Prefer isolation='worktree'.");
     }
     args.push(...extra);
-    const disabledMcp = !input.inheritMcp || readonly ? await readConfiguredMcpServerNames(input.cwd) : undefined;
-    const inlineConfig = mergeInlineConfig(process.env.OPENCODE_CONFIG_CONTENT, name, agent, nativeDepthLimit(input.nativeSubagents), warnings, disabledMcp);
+    const env = input.env ?? process.env;
+    const disabledMcp = !input.inheritMcp || readonly ? await readConfiguredMcpServers(input.cwd, env) : undefined;
+    const { config: inlineConfig, secrets } = mergeInlineConfig(
+      getEnvValue(env, "OPENCODE_CONFIG_CONTENT"), name, agent, nativeDepthLimit(input.nativeSubagents), warnings, disabledMcp);
     return {
       command: launch.command, args: [...launch.prefixArgs, ...args], stdin: input.prompt,
       envOverrides: { OPENCODE_CONFIG_CONTENT: JSON.stringify(inlineConfig) },
+      ...(secrets.length > 0 ? { secrets } : {}),
       outputMode: outputModeFor(args, ["--format"], "json"),
       tempFiles: [], warnings, nativeEffort,
     };
@@ -286,10 +399,12 @@ export class OpenCodeAdapter implements CliAdapter {
             cached_input_tokens: addNumber(state.usage?.cached_input_tokens, isObject(tokens.cache) ? tokens.cache.read : undefined),
             cost_usd: addNumber(state.usage?.cost_usd, part.cost),
           });
-        } else if (event.type === "error") {
+        } else if (event.type === "error" || isObject(event.error)) {
           const error = isObject(event.error) ? event.error : {};
           if (error.type === "provider.auth") state.forceAuthError = true;
-          const message = asString(error.message) ?? asString(event.message) ?? "OpenCode reported an error.";
+          // Structured OpenCode errors keep their text in `error.data.message`.
+          const dataMessage = isObject(error.data) ? asString(error.data.message) : undefined;
+          const message = asString(error.message) ?? dataMessage ?? asString(event.message) ?? "OpenCode reported an error.";
           state.errors[0] = state.forceAuthError ? `Authentication required: ${message}` : message;
         }
       },
